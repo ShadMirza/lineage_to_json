@@ -549,4 +549,42 @@ import csv
 # 	)
 
 # 	rows = parse_lineage_file(args.input_file, args.delimiter)
-# 	nested = line
+# 	nested = lineage_to_nested_json(
+# 		rows,
+# 		target_column=args.target_column,
+# 		target_table=args.target_table,
+# 		match_on_table=not args.column_only_match,
+# 		max_depth=args.max_depth
+# 	)
+
+# 	def safe_filename(name: str) -> str:
+# 		return ''.join(c if c.isalnum() or c in ('-_') else '_' for c in name)
+
+# 	if args.output:
+# 		os.makedirs(args.output, exist_ok=True)
+# 		merged_dir = os.path.join(args.output, '_merged_')
+# 		os.makedirs(merged_dir, exist_ok=True)
+# 		for entry in nested:
+# 			col = entry.get('generated_column', 'output')
+# 			fname = safe_filename(str(col)) + '.json'
+
+# 			fpath = os.path.join(args.output, fname)
+# 			with open(fpath, 'w', encoding='utf-8') as f:
+# 				json.dump(entry, f, indent=2)
+
+# 			merged_entry = copy.deepcopy(entry)
+# 			for lk in list(merged_entry['lineage'].keys()):
+# 				if isinstance(lk, str) and lk.startswith('LEVEL '):
+# 					merged_entry['lineage'][lk] = [merge_passthrough_chain(c) for c in merged_entry['lineage'][lk]]
+# 			mpath = os.path.join(merged_dir, fname)
+# 			with open(mpath, 'w', encoding='utf-8') as f:
+# 				json.dump(merged_entry, f, indent=2)
+
+# 		print(f"Wrote {len(nested)} files to {args.output}")
+# 		print(f"Wrote {len(nested)} merged files to {merged_dir}")
+# 	else:
+# 		print(json.dumps(nested, indent=2))
+
+
+# if __name__ == '__main__':
+# 	main()
