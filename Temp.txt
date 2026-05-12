@@ -1,0 +1,457 @@
+"""import csv
+# import copy
+# import json
+# import logging
+# from collections import defaultdict
+# from typing import List, Dict, Any, Optional, Tuple
+
+
+# logger = logging.getLogger(__name__)
+
+# # ---------------------------------------------------------------------------
+# # v5 changes vs v4:
+# #   - Removed: compute_levels (SCC/BFS/Kahn), group_by_level
+# #   - Added:   build_adjacency, find_root_rows
+# #   - Changed: parse_lineage_file (no Level needed), build_lineage_tree
+# #              (adjacency lookup + local_depth), lineage_to_nested_json
+# #              (adjacency-based roots)
+# #   - Unchanged: attach_level_groups, merge_passthrough_chain, main
+# # ---------------------------------------------------------------------------
+
+
+# def parse_lineage_file(file_path: str, delimiter: str = '\t') -> List[Dict[str, Any]]:
+# 	with open(file_path, 'r', encoding='utf-8-sig') as f:
+# 		reader = csv.DictReader(f, delimiter=delimiter)
+# 		rows = [dict(row) for row in reader]
+# 	# Normalise key fields in-place (mirrors group_by_level stripping in v4)
+# 	strip_keys = ['Source Column', 'Target Column', 'Source Table Name', 'Target Table Name', 'Script Name']
+# 	for row in rows:
+# 		for k in strip_keys:
+# 			if k in row and isinstance(row[k], str):
+# 				row[k] = row[k].strip()
+# 	return rows
+
+
+# def build_adjacency(
+# 	rows: List[Dict[str, Any]]
+# ) -> Tuple[Dict[tuple, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+# 	"""Build two lookup maps from all rows.
+
+# 	adjacency    : (target_table_lower, target_column_lower) -> [rows]
+# 	col_adjacency: target_column_lower -> [rows]  (used when match_on_table=False)
+# 	"""
+# 	adjacency: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
+# 	col_adjacency: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+# 	for row in rows:
+# 		tgt_tbl = (row.get('Target Table Name') or '').strip()
+# 		tgt_col = (row.get('Target Column') or '').strip()
+# 		if not tgt_tbl or not tgt_col or tgt_tbl.upper() == 'N/A' or tgt_col.upper() == 'N/A':
+# 			continue
+# 		key = (tgt_tbl.lower(), tgt_col.lower())
+# 		adjacency[key].append(row)
+# 		col_adjacency[tgt_col.lower()].append(row)
+# 	return adjacency, col_adjacency
+
+
+# def find_root_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+# 	"""Return rows whose target table never appears as a source table.
+
+# 	These are the final output tables — the roots of the lineage graph.
+# 	Mirrors the hybrid-rooting logic that was inside compute_levels in v4.
+# 	"""
+# 	all_target_tables: set = set()
+# 	all_source_tables: set = set()
+# 	for row in rows:
+# 		tgt = (row.get('Target Table Name') or '').strip()
+# 		if tgt and tgt.upper() != 'N/A':
+# 			all_target_tables.add(tgt)
+# 		for t in (row.get('Source Table Name') or '').split(','):
+# 			t = t.strip()
+# 			if t and t.upper() != 'N/A':
+# 				all_source_tables.add(t)
+# 	final_tables = all_target_tables - all_source_tables
+# 	if not final_tables:
+# 		final_tables = all_target_tables
+# 	return [row for row in rows if (row.get('Target Table Name') or '').strip() in final_tables]
+
+
+# def attach_level_groups(node: Dict[str, Any], children: List[Dict[str, Any]]) -> Dict[str, Any]:
+# 	for k in list(node.keys()):
+# 		if isinstance(k, str) and k.startswith('LEVEL '):
+# 			node.pop(k, None)
+
+# 	grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+# 	for child in children:
+# 		if not isinstance(child, dict):
+# 			continue
+# 		try:
+# 			lvl = int(child.get('level', 0))
+# 		except (TypeError, ValueError):
+# 			continue
+# 		grouped[lvl].append(child)
+# 	for lvl in sorted(grouped.keys()):
+# 		node[f'LEVEL {lvl}'] = grouped[lvl]
+# 	return node
+
+
+# def merge_passthrough_chain(node: Dict[str, Any]) -> Dict[str, Any]:
+# 	"""Merge consecutive single-child DIRECT_PASSTHROUGH nodes bottom-up."""
+# 	for k in list(node.keys()):
+# 		if isinstance(k, str) and k.startswith('LEVEL '):
+# 			node[k] = [merge_passthrough_chain(child) for child in node[k]]
+
+# 	if node.get('transformation', '').strip() != 'DIRECT_PASSTHROUGH':
+# 		return node
+
+# 	while True:
+# 		lvl_keys = [k for k in node if isinstance(k, str) and k.startswith('LEVEL ')]
+# 		if len(lvl_keys) != 1 or len(node[lvl_keys[0]]) != 1:
+# 			break
+# 		child = node[lvl_keys[0]][0]
+# 		if child.get('transformation', '').strip() != 'DIRECT_PASSTHROUGH':
+# 			break
+
+# 		existing_tbls = [t.strip() for t in node.get('source_tables', '').split(',') if t.strip() and t.strip().upper() != 'N/A']
+# 		for t in child.get('source_tables', '').split(','):
+# 			t = t.strip()
+# 			if t and t.upper() != 'N/A' and t not in existing_tbls:
+# 				existing_tbls.append(t)
+# 		node['source_tables'] = ', '.join(existing_tbls)
+
+# 		existing_fl = node.get('filter_logic', '').strip()
+# 		child_fl = child.get('filter_logic', '').strip()
+# 		if child_fl and child_fl.upper() != 'N/A' and child_fl not in existing_fl:
+# 			node['filter_logic'] = (existing_fl + ', ' + child_fl) if existing_fl and existing_fl.upper() != 'N/A' else child_fl
+# 		elif existing_fl.upper() == 'N/A' and child_fl and child_fl.upper() != 'N/A':
+# 			node['filter_logic'] = child_fl
+
+# 		existing_sn = [s.strip() for s in node.get('script_name', '').split(',') if s.strip() and s.strip().upper() != 'N/A']
+# 		for s in child.get('script_name', '').split(','):
+# 			s = s.strip()
+# 			if s and s.upper() != 'N/A' and s not in existing_sn:
+# 				existing_sn.append(s)
+# 		node['script_name'] = ', '.join(existing_sn)
+
+# 		node.setdefault('merged_levels', []).append(child['level'])
+# 		if child.get('merged_levels'):
+# 			node['merged_levels'].extend(child['merged_levels'])
+
+# 		del node[lvl_keys[0]]
+# 		for ck in [k for k in child if isinstance(k, str) and k.startswith('LEVEL ')]:
+# 			node[ck] = child[ck]
+
+# 		if not any(k for k in child if isinstance(k, str) and k.startswith('LEVEL ')):
+# 			break
+
+# 	return node
+
+
+# def build_lineage_tree(
+# 	adjacency: Dict[tuple, List[Dict[str, Any]]],
+# 	col_adjacency: Dict[str, List[Dict[str, Any]]],
+# 	target_column: str,
+# 	target_table: str,
+# 	local_depth: int = 1,
+# 	visited_in_root: Optional[set] = None,
+# 	path_visited: Optional[set] = None,
+# 	cycle_stats: Optional[Dict[str, Any]] = None,
+# 	max_depth: int = 100,
+# 	match_on_table: bool = True,
+# 	dedup_mode: str = 'branch'
+# ) -> List[Dict[str, Any]]:
+# 	"""Recursively build the lineage tree using direct adjacency lookup.
+
+# 	local_depth controls both the output 'level' field (contiguous 1,2,3...)
+# 	and the max_depth guard — no global level computation needed.
+# 	"""
+# 	if visited_in_root is None:
+# 		visited_in_root = set()
+# 	if path_visited is None:
+# 		path_visited = set()
+# 	if cycle_stats is None:
+# 		cycle_stats = {'skipped': 0}
+# 	if local_depth > max_depth:
+# 		return []
+
+# 	children = []
+# 	target_column_norm = (target_column or '').strip().lower()
+# 	target_table_norm = (target_table or '').strip().lower()
+
+# 	if match_on_table:
+# 		candidate_rows = adjacency.get((target_table_norm, target_column_norm), [])
+# 	else:
+# 		candidate_rows = col_adjacency.get(target_column_norm, [])
+
+# 	for row in candidate_rows:
+# 		node_id = (
+# 			row.get('Source Column', ''),
+# 			row.get('Target Column', ''),
+# 			row.get('Source Table Name', ''),
+# 			row.get('Target Table Name', ''),
+# 			row.get('Script Name', ''),
+# 			row.get('Transformation', ''),
+# 			row.get('Filter Logic', '') or str(row)
+# 		)
+
+# 		if node_id in path_visited:
+# 			cycle_stats['skipped'] = cycle_stats.get('skipped', 0) + 1
+# 			logger.warning(
+# 				"Cycle skipped at depth=%s target=%s.%s source=%s.%s",
+# 				local_depth,
+# 				row.get('Target Table Name', ''),
+# 				row.get('Target Column', ''),
+# 				row.get('Source Table Name', ''),
+# 				row.get('Source Column', '')
+# 			)
+# 			# Keep a terminal node so lineage structure is not lost when cycles are cut.
+# 			children.append({
+# 				'level': local_depth,
+# 				'source_column': row.get('Source Column', ''),
+# 				'target_column': row.get('Target Column', ''),
+# 				'source_tables': row.get('Source Table Name', ''),
+# 				'target_table': row.get('Target Table Name', ''),
+# 				'transformation': row.get('Transformation', ''),
+# 				'script_name': row.get('Script Name', ''),
+# 				'filter_logic': row.get('Filter Logic', '')
+# 			})
+# 			continue
+
+# 		# In root mode, deduplicate within one top-level lineage object.
+# 		# In branch mode, allow sibling branches to repeat shared upstream paths.
+# 		if dedup_mode == 'root':
+# 			if node_id in visited_in_root:
+# 				continue
+# 			visited_in_root.add(node_id)
+
+# 		row_path_visited = set(path_visited)
+# 		row_path_visited.add(node_id)
+
+# 		if row['Source Column'] == 'N/A' and row['Source Table Name'] == 'N/A':
+# 			children.append({
+# 				'level': local_depth,
+# 				'source_column': row['Source Column'],
+# 				'target_column': row['Target Column'],
+# 				'source_tables': row['Source Table Name'],
+# 				'target_table': row['Target Table Name'],
+# 				'transformation': row.get('Transformation', ''),
+# 				'script_name': row.get('Script Name', ''),
+# 				'filter_logic': row.get('Filter Logic', '')
+# 			})
+# 		else:
+# 			_src_cols = [c.strip() for c in row['Source Column'].split(',')]
+# 			_src_tbls = [t.strip() for t in row['Source Table Name'].split(',')]
+# 			if len(_src_cols) == len(_src_tbls):
+# 				_pairs = list(zip(_src_cols, _src_tbls))
+# 			else:
+# 				_pairs = [(c, t) for c in _src_cols for t in _src_tbls]
+# 			sub_children = []
+# 			for _src_col, _src_tbl in _pairs:
+# 				sub_children.extend(build_lineage_tree(
+# 					adjacency,
+# 					col_adjacency,
+# 					_src_col,
+# 					_src_tbl,
+# 					local_depth + 1,
+# 					visited_in_root,
+# 					row_path_visited,
+# 					cycle_stats,
+# 					max_depth,
+# 					match_on_table=match_on_table,
+# 					dedup_mode=dedup_mode
+# 				))
+# 			node = {
+# 				'level': local_depth,
+# 				'source_column': row['Source Column'],
+# 				'target_column': row['Target Column'],
+# 				'source_tables': row['Source Table Name'],
+# 				'target_table': row['Target Table Name'],
+# 				'transformation': row.get('Transformation', ''),
+# 				'script_name': row.get('Script Name', ''),
+# 				'filter_logic': row.get('Filter Logic', '')
+# 			}
+# 			if sub_children:
+# 				node = attach_level_groups(node, sub_children)
+# 			children.append(node)
+
+# 	return children
+
+
+# def lineage_to_nested_json(
+# 	rows: List[Dict[str, Any]],
+# 	target_column: Optional[str] = None,
+# 	target_table: Optional[str] = None,
+# 	match_on_table: bool = True,
+# 	max_depth: int = 100,
+# 	dedup_mode: str = 'branch'
+# ) -> List[Dict[str, Any]]:
+# 	adjacency, col_adjacency = build_adjacency(rows)
+# 	root_rows = find_root_rows(rows)
+# 	logger.debug("Root rows count: %s", len(root_rows))
+
+# 	result = []
+# 	seen: set = set()
+# 	target_column_norm = (target_column or '').strip().lower() if target_column else None
+# 	target_table_norm = (target_table or '').strip().lower() if target_table else None
+
+# 	for row in root_rows:
+# 		key = (
+# 			(row.get('Target Column') or '').strip().lower(),
+# 			(row.get('Target Table Name') or '').strip().lower()
+# 		)
+# 		if key in seen:
+# 			continue
+# 		if target_column_norm and key[0] != target_column_norm:
+# 			continue
+# 		if target_table_norm and key[1] != target_table_norm:
+# 			continue
+# 		seen.add(key)
+
+# 		lookup_key = (key[1], key[0])
+# 		group_rows = adjacency.get(lookup_key, [])
+
+# 		all_source_columns: set = set()
+# 		all_source_tables: set = set()
+# 		script_names: set = set()
+# 		for r in group_rows:
+# 			for col in r['Source Column'].split(','):
+# 				v = col.strip()
+# 				if v and v.upper() != 'N/A':
+# 					all_source_columns.add(v)
+# 			for tbl in r['Source Table Name'].split(','):
+# 				v = tbl.strip()
+# 				if v and v.upper() != 'N/A':
+# 					all_source_tables.add(v)
+# 			if 'Script Name' in r and r['Script Name'] and r['Script Name'].upper() != 'N/A':
+# 				script_names.add(r['Script Name'])
+
+# 		script_name = ','.join(sorted(script_names)) if script_names else ''
+# 		lineage: Dict[str, Any] = {
+# 			'generated_column': row['Target Column'],
+# 			'lineage': {
+# 				'level': 0,
+# 				'source_column': ','.join(sorted(all_source_columns)),
+# 				'target_column': row['Target Column'],
+# 				'source_tables': ','.join(sorted(all_source_tables)),
+# 				'target_table': row['Target Table Name'],
+# 				'transformation': ','.join(sorted(set(r.get('Transformation', '') for r in group_rows if r.get('Transformation', '').upper() != 'N/A'))),
+# 				'script_name': script_name,
+# 				'filter_logic': ','.join(sorted(set(r.get('Filter Logic', '') for r in group_rows if r.get('Filter Logic', '').upper() != 'N/A')))
+# 			}
+# 		}
+
+# 		children: List[Dict[str, Any]] = []
+# 		visited_in_root: set = set()
+# 		cycle_stats = {'skipped': 0}
+# 		for r in group_rows:
+# 			src_cols = [c.strip() for c in r['Source Column'].split(',')]
+# 			src_tbls = [t.strip() for t in r['Source Table Name'].split(',')]
+# 			if len(src_cols) == len(src_tbls):
+# 				pairs = zip(src_cols, src_tbls)
+# 			else:
+# 				pairs = [(c, t) for c in src_cols for t in src_tbls]
+# 			for src_col, src_tbl in pairs:
+# 				sub_children = build_lineage_tree(
+# 					adjacency,
+# 					col_adjacency,
+# 					src_col,
+# 					src_tbl,
+# 					local_depth=1,
+# 					visited_in_root=visited_in_root,
+# 					path_visited=set(),
+# 					cycle_stats=cycle_stats,
+# 					max_depth=max_depth,
+# 					match_on_table=match_on_table,
+# 					dedup_mode=dedup_mode
+# 				)
+# 				if sub_children:
+# 					children.extend(sub_children)
+
+# 		if cycle_stats.get('skipped', 0):
+# 			logger.info(
+# 				"Traversal summary for %s.%s: skipped_cycles=%s",
+# 				row.get('Target Table Name', ''),
+# 				row.get('Target Column', ''),
+# 				cycle_stats['skipped']
+# 			)
+
+# 		if children:
+# 			lineage['lineage'] = attach_level_groups(lineage['lineage'], children)
+
+# 		result.append(lineage)
+# 	return result
+
+
+# def main() -> None:
+# 	import argparse
+# 	import os
+
+# 	parser = argparse.ArgumentParser(
+# 		description='Column-level lineage to nested JSON - adjacency-based traversal, no Level column needed.'
+# 	)
+# 	parser.add_argument('input_file', help='Input CSV/TSV file path')
+# 	parser.add_argument('-d', '--delimiter', default='\t', help='Delimiter (default: tab)')
+# 	parser.add_argument('-o', '--output', help='Output directory path (default: stdout)')
+# 	parser.add_argument('--target_column', help='Filter: target column name (optional)')
+# 	parser.add_argument('--target_table', help='Filter: target table name (optional)')
+# 	parser.add_argument('--max_depth', type=int, default=100, help='Maximum lineage depth to traverse (default: 100)')
+# 	parser.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help='Logging level (default: INFO)')
+# 	parser.add_argument(
+# 		'--dedup_mode',
+# 		default='branch',
+# 		choices=['branch', 'root'],
+# 		help='branch: repeat shared upstream paths per sibling (default); root: deduplicate within one output object'
+# 	)
+# 	parser.add_argument(
+# 		'--column_only_match',
+# 		action='store_true',
+# 		help='Match lineage by target column only (ignore target table) during recursion'
+# 	)
+# 	args = parser.parse_args()
+
+# 	logging.basicConfig(
+# 		level=getattr(logging, args.log_level),
+# 		format='%(asctime)s %(levelname)s %(message)s'
+# 	)
+
+# 	rows = parse_lineage_file(args.input_file, args.delimiter)
+# 	nested = lineage_to_nested_json(
+# 		rows,
+# 		target_column=args.target_column,
+# 		target_table=args.target_table,
+# 		match_on_table=not args.column_only_match,
+# 		max_depth=args.max_depth,
+# 		dedup_mode=args.dedup_mode
+# 	)
+
+# 	def safe_filename(name: str) -> str:
+# 		return ''.join(c if c.isalnum() or c in ('-_') else '_' for c in name)
+
+# 	if args.output:
+# 		os.makedirs(args.output, exist_ok=True)
+# 		merged_dir = os.path.join(args.output, '_merged_')
+# 		os.makedirs(merged_dir, exist_ok=True)
+# 		for entry in nested:
+# 			col = entry.get('generated_column', 'output')
+# 			fname = safe_filename(str(col)) + '.json'
+
+# 			fpath = os.path.join(args.output, fname)
+# 			with open(fpath, 'w', encoding='utf-8') as f:
+# 				json.dump(entry, f, indent=2)
+
+# 			merged_entry = copy.deepcopy(entry)
+# 			for lk in list(merged_entry['lineage'].keys()):
+# 				if isinstance(lk, str) and lk.startswith('LEVEL '):
+# 					merged_entry['lineage'][lk] = [merge_passthrough_chain(c) for c in merged_entry['lineage'][lk]]
+# 			mpath = os.path.join(merged_dir, fname)
+# 			with open(mpath, 'w', encoding='utf-8') as f:
+# 				json.dump(merged_entry, f, indent=2)
+
+# 		print(f"Wrote {len(nested)} files to {args.output}")
+# 		print(f"Wrote {len(nested)} merged files to {merged_dir}")
+# 	else:
+# 		print(json.dumps(nested, indent=2))
+
+
+# if __name__ == '__main__':
+# 	main()
+# """
