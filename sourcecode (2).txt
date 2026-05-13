@@ -1,0 +1,695 @@
+import csv
+# import copy
+# import json
+# import logging
+# import uuid
+# from collections import defaultdict
+# from typing import List, Dict, Any, Optional
+
+
+# logger = logging.getLogger(__name__)
+
+
+# def compute_levels(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+# 	"""Derive 'Level' for every row from lineage topology when the column is absent.
+
+# 	Level 0 = target table+column nodes that belong to final output tables.
+# 	Level N = longest upstream distance from a Level 0 seed.
+# 	Cycles are handled by collapsing strongly-connected components (SCCs).
+# 	"""
+# 	if not rows:
+# 		return rows
+
+# 	# Auto-detect canonical vs lowercase header names
+# 	sample = rows[0]
+# 	tgt_tbl_key = 'Target Table Name' if 'Target Table Name' in sample else 'target_table'
+# 	src_tbl_key = 'Source Table Name' if 'Source Table Name' in sample else 'source_table'
+# 	tgt_col_key = 'Target Column' if 'Target Column' in sample else 'target_column'
+# 	src_col_key = 'Source Column' if 'Source Column' in sample else 'source_column'
+
+# 	# Build adjacency: target node (table, column) -> source nodes (table, column)
+# 	target_to_sources: Dict[tuple, set] = defaultdict(set)
+# 	reverse_edges: Dict[tuple, set] = defaultdict(set)
+# 	all_targets: set = set()
+# 	all_sources: set = set()
+# 	all_nodes: set = set()
+# 	all_target_tables: set = set()
+# 	all_source_tables: set = set()
+
+# 	for row in rows:
+# 		tgt_tbl = (row.get(tgt_tbl_key) or '').strip()
+# 		tgt_col = (row.get(tgt_col_key) or '').strip()
+# 		if not tgt_tbl or not tgt_col or tgt_tbl.upper() == 'N/A' or tgt_col.upper() == 'N/A':
+# 			continue
+# 		all_target_tables.add(tgt_tbl)
+
+# 		target_node = (tgt_tbl, tgt_col)
+# 		all_targets.add(target_node)
+# 		all_nodes.add(target_node)
+
+# 		src_cols = [c.strip() for c in (row.get(src_col_key) or '').split(',')]
+# 		src_tbls = [t.strip() for t in (row.get(src_tbl_key) or '').split(',')]
+
+# 		if len(src_cols) == len(src_tbls):
+# 			pairs = zip(src_cols, src_tbls)
+# 		else:
+# 			pairs = [(c, t) for c in src_cols for t in src_tbls]
+
+# 		for src_col, src_tbl in pairs:
+# 			if not src_tbl or not src_col:
+# 				continue
+# 			if src_tbl.upper() == 'N/A' or src_col.upper() == 'N/A':
+# 				continue
+# 			all_source_tables.add(src_tbl)
+# 			source_node = (src_tbl, src_col)
+# 			all_sources.add(source_node)
+# 			all_nodes.add(source_node)
+# 			target_to_sources[target_node].add(source_node)
+# 			reverse_edges[source_node].add(target_node)
+
+# 	# Hybrid rooting to preserve output behavior:
+# 	# level-0 seeds are target nodes that belong to final tables.
+# 	final_tables = all_target_tables - all_source_tables
+# 	if not final_tables:
+# 		final_tables = all_target_tables
+
+# 	final_nodes = {n for n in all_targets if n[0] in final_tables}
+# 	if not final_nodes:  # edge-case fallback
+# 		final_nodes = all_targets - all_sources
+# 	if not final_nodes:  # full-cycle edge-case fallback
+# 		final_nodes = all_targets
+
+# 	# Restrict computation to nodes reachable from level-0 seeds.
+# 	reachable: set = set()
+# 	queue: List[tuple] = list(final_nodes)
+# 	while queue:
+# 		n = queue.pop(0)
+# 		if n in reachable:
+# 			continue
+# 		reachable.add(n)
+# 		for src in target_to_sources.get(n, set()):
+# 			if src not in reachable:
+# 				queue.append(src)
+
+# 	# First pass of Kosaraju: finishing order on reachable subgraph.
+# 	visited: set = set()
+# 	finish_order: List[tuple] = []
+# 	for start in sorted(reachable):
+# 		if start in visited:
+# 			continue
+# 		stack: List[tuple] = [(start, 0)]
+# 		visited.add(start)
+# 		while stack:
+# 			node, phase = stack.pop()
+# 			if phase == 0:
+# 				stack.append((node, 1))
+# 				for nei in sorted(target_to_sources.get(node, set())):
+# 					if nei in reachable and nei not in visited:
+# 						visited.add(nei)
+# 						stack.append((nei, 0))
+# 			else:
+# 				finish_order.append(node)
+
+# 	# Second pass: assign SCC ids on reversed graph.
+# 	comp_id: Dict[tuple, int] = {}
+# 	components: List[List[tuple]] = []
+# 	for start in reversed(finish_order):
+# 		if start in comp_id:
+# 			continue
+# 		cid = len(components)
+# 		components.append([])
+# 		stack = [start]
+# 		comp_id[start] = cid
+# 		while stack:
+# 			node = stack.pop()
+# 			components[cid].append(node)
+# 			for nei in reverse_edges.get(node, set()):
+# 				if nei in reachable and nei not in comp_id:
+# 					comp_id[nei] = cid
+# 					stack.append(nei)
+
+# 	# Build DAG of SCC components.
+# 	comp_adj: Dict[int, set] = defaultdict(set)
+# 	comp_indeg: Dict[int, int] = defaultdict(int)
+# 	for node in reachable:
+# 		c_from = comp_id[node]
+# 		for src in target_to_sources.get(node, set()):
+# 			if src not in reachable:
+# 				continue
+# 			c_to = comp_id[src]
+# 			if c_from != c_to and c_to not in comp_adj[c_from]:
+# 				comp_adj[c_from].add(c_to)
+# 				comp_indeg[c_to] += 1
+
+# 	# Longest-distance layering over component DAG (seeded at level 0).
+# 	seed_components = {comp_id[n] for n in final_nodes if n in reachable}
+# 	comp_level: Dict[int, int] = {cid: 0 for cid in seed_components}
+# 	kahn: List[int] = [cid for cid in range(len(components)) if comp_indeg.get(cid, 0) == 0]
+# 	while kahn:
+# 		cid = kahn.pop(0)
+# 		for nxt in comp_adj.get(cid, set()):
+# 			if cid in comp_level:
+# 				cand = comp_level[cid] + 1
+# 				if cand > comp_level.get(nxt, -1):
+# 					comp_level[nxt] = cand
+# 			comp_indeg[nxt] -= 1
+# 			if comp_indeg[nxt] == 0:
+# 				kahn.append(nxt)
+
+# 	node_level: Dict[tuple, int] = {}
+# 	for node in reachable:
+# 		node_level[node] = comp_level.get(comp_id[node], 0)
+
+# 	fallback_level = (max(node_level.values()) + 1) if node_level else 0
+
+# 	# Stamp each row with its computed level using target node (table, column)
+# 	for row in rows:
+# 		tgt_tbl = (row.get(tgt_tbl_key) or '').strip()
+# 		tgt_col = (row.get(tgt_col_key) or '').strip()
+# 		row['Level'] = node_level.get((tgt_tbl, tgt_col), fallback_level)
+
+# 	lvls = list(node_level.values())
+# 	print(
+# 		f"DEBUG: compute_levels assigned levels to {len(node_level)} table-column nodes, "
+# 		f"range {min(lvls, default=0)}-{max(lvls, default=0)}"
+# 	)
+# 	return rows
+
+
+# def parse_lineage_file(file_path: str, delimiter: str = '\t') -> List[Dict[str, Any]]:
+# 	with open(file_path, 'r', encoding='utf-8-sig') as f:
+# 		reader = csv.DictReader(f, delimiter=delimiter)
+# 		rows = [dict(row) for row in reader]
+# 	# If the CSV has no Level column, derive it automatically from lineage topology
+# 	if rows and 'Level' not in rows[0]:
+# 		print("DEBUG: 'Level' column not found - computing levels from lineage topology.")
+# 		rows = compute_levels(rows)
+# 	return rows
+
+
+# def group_by_level(rows: List[Dict[str, Any]]) -> Dict[int, List[Dict[str, Any]]]:
+# 	levels: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+# 	for row in rows:
+# 		try:
+# 			level = int(row['Level'])
+# 		except (KeyError, ValueError):
+# 			continue
+# 		for k in ['Source Column', 'Target Column', 'Source Table Name', 'Target Table Name', 'Script Name']:
+# 			if k in row and isinstance(row[k], str):
+# 				row[k] = row[k].strip()
+# 		levels[level].append(row)
+# 	return levels
+
+
+# def attach_level_groups(node: Dict[str, Any], children: List[Dict[str, Any]]) -> Dict[str, Any]:
+# 	"""Attach children grouped by level while keeping LEVEL arrays at the end."""
+# 	# Remove existing LEVEL groups
+# 	for k in list(node.keys()):
+# 		if isinstance(k, str) and k.startswith('LEVEL '):
+# 			node.pop(k, None)
+
+# 	# Group children by level
+# 	grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+# 	for child in children:
+# 		if not isinstance(child, dict):
+# 			continue
+# 		try:
+# 			lvl = int(child.get('level', 0))
+# 		except (TypeError, ValueError):
+# 			continue
+# 		grouped[lvl].append(child)
+	
+# 	for lvl in sorted(grouped.keys()):
+# 		node[f'LEVEL {lvl}'] = grouped[lvl]
+# 	return node
+
+
+# def merge_passthrough_chain(node: Dict[str, Any]) -> Dict[str, Any]:
+# 	"""Merge consecutive single-child DIRECT_PASSTHROUGH nodes bottom-up."""
+# 	for k in list(node.keys()):
+# 		if isinstance(k, str) and k.startswith('LEVEL '):
+# 			node[k] = [merge_passthrough_chain(child) for child in node[k]]
+
+# 	if node.get('transformation', '').strip() != 'DIRECT_PASSTHROUGH':
+# 		return node
+
+# 	while True:
+# 		lvl_keys = [k for k in node if isinstance(k, str) and k.startswith('LEVEL ')]
+# 		if len(lvl_keys) != 1 or len(node[lvl_keys[0]]) != 1:
+# 			break
+# 		child = node[lvl_keys[0]][0]
+# 		if child.get('transformation', '').strip() != 'DIRECT_PASSTHROUGH':
+# 			break
+
+# 		existing_tbls = [t.strip() for t in node.get('source_tables', '').split(',') if t.strip() and t.strip().upper() != 'N/A']
+# 		for t in child.get('source_tables', '').split(','):
+# 			t = t.strip()
+# 			if t and t.upper() != 'N/A' and t not in existing_tbls:
+# 				existing_tbls.append(t)
+# 		node['source_tables'] = ', '.join(existing_tbls)
+
+# 		existing_fl = node.get('filter_logic', '').strip()
+# 		child_fl = child.get('filter_logic', '').strip()
+# 		if child_fl and child_fl.upper() != 'N/A' and child_fl not in existing_fl:
+# 			node['filter_logic'] = (existing_fl + ', ' + child_fl) if existing_fl and existing_fl.upper() != 'N/A' else child_fl
+# 		elif existing_fl.upper() == 'N/A' and child_fl and child_fl.upper() != 'N/A':
+# 			node['filter_logic'] = child_fl
+
+# 		existing_sn = [s.strip() for s in node.get('script_name', '').split(',') if s.strip() and s.strip().upper() != 'N/A']
+# 		for s in child.get('script_name', '').split(','):
+# 			s = s.strip()
+# 			if s and s.upper() != 'N/A' and s not in existing_sn:
+# 				existing_sn.append(s)
+# 		node['script_name'] = ', '.join(existing_sn)
+
+# 		node.setdefault('merged_levels', []).append(child['level'])
+# 		if child.get('merged_levels'):
+# 			node['merged_levels'].extend(child['merged_levels'])
+
+# 		del node[lvl_keys[0]]
+# 		for ck in [k for k in child if isinstance(k, str) and k.startswith('LEVEL ')]:
+# 			node[ck] = child[ck]
+
+# 		if not any(k for k in child if isinstance(k, str) and k.startswith('LEVEL ')):
+# 			break
+
+# 	return node
+
+
+# def build_target_indexes(levels: Dict[int, List[Dict[str, Any]]]) -> Dict[str, Dict[Any, List[tuple]]]:
+# 	"""Build lookup indexes to avoid repeatedly scanning all rows at each recursion step."""
+# 	by_table_col: Dict[tuple, List[tuple]] = defaultdict(list)
+# 	by_col: Dict[str, List[tuple]] = defaultdict(list)
+# 	for lvl, rows in levels.items():
+# 		for row in rows:
+# 			tgt_col = (row.get('Target Column') or '').strip().lower()
+# 			tgt_tbl = (row.get('Target Table Name') or '').strip().lower()
+# 			if not tgt_col:
+# 				continue
+# 			by_table_col[(tgt_col, tgt_tbl)].append((lvl, row))
+# 			by_col[tgt_col].append((lvl, row))
+
+# 	for key in by_table_col:
+# 		by_table_col[key].sort(key=lambda x: x[0])
+# 	for key in by_col:
+# 		by_col[key].sort(key=lambda x: x[0])
+
+# 	return {
+# 		'by_table_col': by_table_col,
+# 		'by_col': by_col,
+# 	}
+
+
+# def build_lineage_tree(
+# 	levels: Dict[int, List[Dict[str, Any]]],
+# 	target_indexes: Dict[str, Dict[Any, List[tuple]]],
+# 	current_level: int,
+# 	target_column: str,
+# 	target_table: str,
+# 	visited_in_root: Optional[set] = None,
+# 	path_visited: Optional[set] = None,
+# 	node_reference_map: Optional[Dict[tuple, str]] = None,
+# 	cycle_stats: Optional[Dict[str, Any]] = None,
+# 	local_depth: int = 1,
+# 	max_depth: int = 100,
+# 	match_on_table: bool = True,
+# 	parent_uuid: str = ''
+# ) -> List[Dict[str, Any]]:
+# 	if visited_in_root is None:
+# 		visited_in_root = set()
+# 	if path_visited is None:
+# 		path_visited = set()
+# 	if node_reference_map is None:
+# 		node_reference_map = {}
+# 	if cycle_stats is None:
+# 		cycle_stats = {
+# 			'skipped': 0,
+# 			'seen_cycle_logs': set(),
+# 			'cycle_logs_emitted': 0,
+# 			'cycle_logs_suppressed': 0,
+# 			'max_cycle_logs': 50,
+# 			'nodes_visited': 0,
+# 		}
+# 	if local_depth > max_depth:
+# 		return []
+# 	children = []
+# 	target_column_norm = (target_column or '').strip().lower()
+# 	target_table_norm = (target_table or '').strip().lower()
+
+# 	min_level = min(levels.keys())
+# 	start_level = max(current_level - 1, min_level)
+# 	if match_on_table:
+# 		candidates = target_indexes.get('by_table_col', {}).get((target_column_norm, target_table_norm), [])
+# 	else:
+# 		candidates = target_indexes.get('by_col', {}).get(target_column_norm, [])
+
+# 	for next_level, row in candidates:
+# 		if next_level < start_level:
+# 			continue
+# 		row_target_column = (row.get('Target Column') or '').strip().lower()
+# 		row_target_table = (row.get('Target Table Name') or '').strip().lower()
+# 		is_column_match = row_target_column == target_column_norm
+# 		is_table_match = row_target_table == target_table_norm
+# 		if (
+# 			is_column_match and
+# 			(is_table_match or not match_on_table)
+# 		):
+# 			node_id = (
+# 				next_level,
+# 				row.get('Source Column', ''),
+# 				row.get('Target Column', ''),
+# 				row.get('Source Table Name', ''),
+# 				row.get('Target Table Name', ''),
+# 				row.get('Script Name', ''),
+# 				row.get('Transformation', ''),
+# 				row.get('Filter Logic', '') or str(row)
+# 			)
+
+# 			# Cycle detection: node_id is in current path
+# 			if node_id in path_visited:
+# 				cycle_stats['skipped'] = cycle_stats.get('skipped', 0) + 1
+# 				cycle_key = (
+# 					next_level,
+# 					row.get('Target Table Name', ''),
+# 					row.get('Target Column', ''),
+# 					row.get('Source Table Name', ''),
+# 					row.get('Source Column', '')
+# 				)
+# 				seen_cycle_logs = cycle_stats.setdefault('seen_cycle_logs', set())
+# 				if cycle_key not in seen_cycle_logs:
+# 					seen_cycle_logs.add(cycle_key)
+# 					if cycle_stats.get('cycle_logs_emitted', 0) < cycle_stats.get('max_cycle_logs', 50):
+# 						cycle_stats['cycle_logs_emitted'] = cycle_stats.get('cycle_logs_emitted', 0) + 1
+# 						logger.warning(
+# 							"Cycle skipped at level=%s target=%s.%s source=%s.%s",
+# 							next_level,
+# 							row.get('Target Table Name', ''),
+# 							row.get('Target Column', ''),
+# 							row.get('Source Table Name', ''),
+# 							row.get('Source Column', '')
+# 						)
+# 					else:
+# 						cycle_stats['cycle_logs_suppressed'] = cycle_stats.get('cycle_logs_suppressed', 0) + 1
+
+# 				# Create cycle marker node
+# 				# parent_uuid = UUID of the node that tried to reach this cyclic node
+# 				cycle_node = {
+# 					'level': local_depth,
+# 					'source_column': row.get('Source Column', ''),
+# 					'target_column': row.get('Target Column', ''),
+# 					'source_tables': row.get('Source Table Name', ''),
+# 					'target_table': row.get('Target Table Name', ''),
+# 					'transformation': row.get('Transformation', ''),
+# 					'script_name': row.get('Script Name', ''),
+# 					'filter_logic': row.get('Filter Logic', ''),
+# 					'node_id': str(uuid.uuid4()),
+# 					'cycle_detected_from': parent_uuid
+# 				}
+# 				children.append(cycle_node)
+# 				continue
+
+# 			# Node already visited in this root - emit marker pointing to where full tree is
+# 			if node_id in visited_in_root:
+# 				children.append({
+# 					'level': local_depth,
+# 					'source_column': row.get('Source Column', ''),
+# 					'target_column': row.get('Target Column', ''),
+# 					'source_tables': row.get('Source Table Name', ''),
+# 					'target_table': row.get('Target Table Name', ''),
+# 					'transformation': row.get('Transformation', ''),
+# 					'script_name': row.get('Script Name', ''),
+# 					'filter_logic': row.get('Filter Logic', ''),
+# 					'node_id': str(uuid.uuid4()),
+# 					'subtree_visited_refer_to_node_id': node_reference_map.get(node_id, '')
+# 				})
+# 				continue
+
+# 			visited_in_root.add(node_id)
+# 			cycle_stats['nodes_visited'] = cycle_stats.get('nodes_visited', 0) + 1
+# 			row_path_visited = set(path_visited)
+# 			row_path_visited.add(node_id)
+
+# 			# Generate UUID for current node
+# 			current_node_uuid = str(uuid.uuid4())
+# 			node_reference_map[node_id] = current_node_uuid
+
+# 			# Leaf node (terminal source)
+# 			if row['Source Column'] == 'N/A' and row['Source Table Name'] == 'N/A':
+# 				node = {
+# 					'level': local_depth,
+# 					'source_column': row['Source Column'],
+# 					'target_column': row['Target Column'],
+# 					'source_tables': row['Source Table Name'],
+# 					'target_table': row['Target Table Name'],
+# 					'transformation': row.get('Transformation', ''),
+# 					'script_name': row.get('Script Name', ''),
+# 					'filter_logic': row.get('Filter Logic', ''),
+# 					'node_id': current_node_uuid
+# 				}
+# 				children.append(node)
+# 			else:
+# 				# Non-leaf node with sources to traverse
+# 				_src_cols = [c.strip() for c in row['Source Column'].split(',')]
+# 				_src_tbls = [t.strip() for t in row['Source Table Name'].split(',')]
+# 				if len(_src_cols) == len(_src_tbls):
+# 					_pairs = list(zip(_src_cols, _src_tbls))
+# 				else:
+# 					_pairs = [(c, t) for c in _src_cols for t in _src_tbls]
+
+# 				sub_children = []
+# 				for _src_col, _src_tbl in _pairs:
+# 					sub_children.extend(build_lineage_tree(
+# 						levels,
+# 						target_indexes,
+# 						next_level,
+# 						_src_col,
+# 						_src_tbl,
+# 						visited_in_root,
+# 						row_path_visited,
+# 						node_reference_map,
+# 						cycle_stats,
+# 						local_depth + 1,
+# 						max_depth,
+# 						match_on_table=match_on_table,
+# 						parent_uuid=current_node_uuid  # Pass current node's UUID
+# 					))
+
+# 				# Build node structure: regular fields first
+# 				node = {
+# 					'level': local_depth,
+# 					'source_column': row['Source Column'],
+# 					'target_column': row['Target Column'],
+# 					'source_tables': row['Source Table Name'],
+# 					'target_table': row['Target Table Name'],
+# 					'transformation': row.get('Transformation', ''),
+# 					'script_name': row.get('Script Name', ''),
+# 					'filter_logic': row.get('Filter Logic', ''),
+# 					'node_id': current_node_uuid
+# 				}
+
+# 				# Attach LEVEL groups when children exist.
+# 				if sub_children:
+# 					node = attach_level_groups(node, sub_children)
+# 				children.append(node)
+
+# 	return children
+
+
+# def lineage_to_nested_json(
+# 	rows: List[Dict[str, Any]],
+# 	target_column: Optional[str] = None,
+# 	target_table: Optional[str] = None,
+# 	match_on_table: bool = True,
+# 	max_depth: int = 100,
+# 	max_cycle_logs: int = 50
+# ) -> List[Dict[str, Any]]:
+# 	levels = group_by_level(rows)
+# 	target_indexes = build_target_indexes(levels)
+# 	print(f"DEBUG: Levels found in data: {sorted(levels.keys())}")
+# 	result = []
+# 	root_level = min(levels.keys())
+# 	level1 = levels.get(root_level, [])
+# 	print(f"DEBUG: Level {root_level} rows count: {len(level1)}")
+# 	seen = set()
+# 	target_column_norm = (target_column or '').strip().lower() if target_column else None
+# 	target_table_norm = (target_table or '').strip().lower() if target_table else None
+
+# 	print(f"DEBUG: Filtering for target_column='{target_column_norm}' and target_table='{target_table_norm}'")
+# 	print(f"DEBUG: Level {root_level} rows with target_column='{target_column_norm}' and target_table='{target_table_norm}':")
+
+# 	for row in level1:
+# 		key = (
+# 			(row.get('Target Column') or '').strip().lower(),
+# 			(row.get('Target Table Name') or '').strip().lower()
+# 		)
+# 		if key in seen:
+# 			continue
+# 		if target_column_norm and key[0] != target_column_norm:
+# 			continue
+# 		if target_table_norm and key[1] != target_table_norm:
+# 			continue
+# 		seen.add(key)
+# 		print(f"DEBUG: Matched row at level {root_level}: {row}")
+
+# 		group_rows = [
+# 			r for r in level1
+# 			if (
+# 				(r.get('Target Column') or '').strip().lower(),
+# 				(r.get('Target Table Name') or '').strip().lower()
+# 			) == key
+# 		]
+
+# 		all_source_columns: set = set()
+# 		all_source_tables: set = set()
+# 		script_names: set = set()
+# 		for r in group_rows:
+# 			for col in r['Source Column'].split(','):
+# 				v = col.strip()
+# 				if v and v.upper() != 'N/A':
+# 					all_source_columns.add(v)
+# 			for tbl in r['Source Table Name'].split(','):
+# 				v = tbl.strip()
+# 				if v and v.upper() != 'N/A':
+# 					all_source_tables.add(v)
+# 			if 'Script Name' in r and r['Script Name'] and r['Script Name'].upper() != 'N/A':
+# 				script_names.add(r['Script Name'])
+
+# 		script_name = ','.join(sorted(script_names)) if script_names else ''
+		
+# 		# Root lineage node with metadata fields
+# 		root_node_uuid = str(uuid.uuid4())
+# 		lineage: Dict[str, Any] = {
+# 			'generated_column': row['Target Column'],
+# 			'lineage': {
+# 				'level': 0,
+# 				'source_column': ','.join(sorted(all_source_columns)),
+# 				'target_column': row['Target Column'],
+# 				'source_tables': ','.join(sorted(all_source_tables)),
+# 				'target_table': row['Target Table Name'],
+# 				'transformation': ','.join(sorted(set(r.get('Transformation', '') for r in group_rows if r.get('Transformation', '').upper() != 'N/A'))),
+# 				'script_name': script_name,
+# 				'filter_logic': ','.join(sorted(set(r.get('Filter Logic', '') for r in group_rows if r.get('Filter Logic', '').upper() != 'N/A'))),
+# 				'node_id': root_node_uuid
+# 			}
+# 		}
+
+# 		children: List[Dict[str, Any]] = []
+# 		visited_in_root: set = set()
+# 		node_reference_map: Dict[tuple, str] = {}
+# 		cycle_stats = {
+# 			'skipped': 0,
+# 			'seen_cycle_logs': set(),
+# 			'cycle_logs_emitted': 0,
+# 			'cycle_logs_suppressed': 0,
+# 			'max_cycle_logs': max_cycle_logs,
+# 			'nodes_visited': 0,
+# 		}
+# 		for r in group_rows:
+# 			src_cols = [c.strip() for c in r['Source Column'].split(',')]
+# 			src_tbls = [t.strip() for t in r['Source Table Name'].split(',')]
+# 			if len(src_cols) == len(src_tbls):
+# 				pairs = zip(src_cols, src_tbls)
+# 			else:
+# 				pairs = [(c, t) for c in src_cols for t in src_tbls]
+# 			for src_col, src_tbl in pairs:
+# 				sub_children = build_lineage_tree(
+# 					levels,
+# 					target_indexes,
+# 					root_level,
+# 					src_col,
+# 					src_tbl,
+# 					visited_in_root=visited_in_root,
+# 					path_visited=set(),
+# 					node_reference_map=node_reference_map,
+# 					cycle_stats=cycle_stats,
+# 					max_depth=max_depth,
+# 					local_depth=1,
+# 					match_on_table=match_on_table,
+# 					parent_uuid=root_node_uuid  # Pass root UUID as parent
+# 				)
+# 				if sub_children:
+# 					children.extend(sub_children)
+
+# 		if cycle_stats.get('skipped', 0):
+# 			print(
+# 				f"DEBUG: Traversal summary for {row.get('Target Table Name', '')}.{row.get('Target Column', '')}: "
+# 				f"skipped_cycles={cycle_stats['skipped']}, "
+# 				f"suppressed_cycle_logs={cycle_stats.get('cycle_logs_suppressed', 0)}, "
+# 				f"nodes_visited={cycle_stats.get('nodes_visited', 0)}"
+# 			)
+
+# 		if children:
+# 			lineage['lineage'] = attach_level_groups(lineage['lineage'], children)
+
+# 		result.append(lineage)
+# 	return result
+
+
+# def main() -> None:
+# 	import argparse
+# 	import os
+
+# 	parser = argparse.ArgumentParser(
+# 		description='Column-level lineage to nested JSON - auto-computes Level when absent.'
+# 	)
+# 	parser.add_argument('input_file', help='Input CSV/TSV file path')
+# 	parser.add_argument('-d', '--delimiter', default='\t', help='Delimiter (default: tab)')
+# 	parser.add_argument('-o', '--output', help='Output directory path (default: stdout)')
+# 	parser.add_argument('--target_column', help='Filter: target column name (optional)')
+# 	parser.add_argument('--target_table', help='Filter: target table name (optional)')
+# 	parser.add_argument('--max_depth', type=int, default=100, help='Maximum lineage depth to traverse (default: 100)')
+# 	parser.add_argument('--max_cycle_logs', type=int, default=50, help='Maximum cycle warning logs emitted per root (default: 50)')
+# 	parser.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help='Logging level (default: INFO)')
+# 	parser.add_argument(
+# 		'--column_only_match',
+# 		action='store_true',
+# 		help='Match lineage by target column only (ignore target table) during recursion'
+# 	)
+# 	args = parser.parse_args()
+
+# 	logging.basicConfig(
+# 		level=getattr(logging, args.log_level),
+# 		format='%(asctime)s %(levelname)s %(message)s'
+# 	)
+
+# 	rows = parse_lineage_file(args.input_file, args.delimiter)
+# 	nested = lineage_to_nested_json(
+# 		rows,
+# 		target_column=args.target_column,
+# 		target_table=args.target_table,
+# 		match_on_table=not args.column_only_match,
+# 		max_depth=args.max_depth,
+# 		max_cycle_logs=args.max_cycle_logs
+# 	)
+
+# 	def safe_filename(name: str) -> str:
+# 		return ''.join(c if c.isalnum() or c in ('-_') else '_' for c in name)
+
+# 	if args.output:
+# 		os.makedirs(args.output, exist_ok=True)
+# 		merged_dir = os.path.join(args.output, '_merged_')
+# 		os.makedirs(merged_dir, exist_ok=True)
+# 		for entry in nested:
+# 			col = entry.get('generated_column', 'output')
+# 			fname = safe_filename(str(col)) + '.json'
+
+# 			fpath = os.path.join(args.output, fname)
+# 			with open(fpath, 'w', encoding='utf-8') as f:
+# 				json.dump(entry, f, indent=2)
+
+# 			merged_entry = copy.deepcopy(entry)
+# 			for lk in list(merged_entry['lineage'].keys()):
+# 				if isinstance(lk, str) and lk.startswith('LEVEL '):
+# 					merged_entry['lineage'][lk] = [merge_passthrough_chain(c) for c in merged_entry['lineage'][lk]]
+# 			mpath = os.path.join(merged_dir, fname)
+# 			with open(mpath, 'w', encoding='utf-8') as f:
+# 				json.dump(merged_entry, f, indent=2)
+
+# 		print(f"Wrote {len(nested)} files to {args.output}")
+# 		print(f"Wrote {len(nested)} merged files to {merged_dir}")
+# 	else:
+# 		print(json.dumps(nested, indent=2))
+
+
+# if __name__ == '__main__':
+# 	main()
