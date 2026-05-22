@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+# """
+# Search newline-separated keywords in a folder tree and log match counts + context.
+
+# Example:
+#   python keyword_tree_search.py --keywords keywords.txt --root D:\data --out results.log
+# """
+
+# from __future__ import annotations
+
+# import argparse
+# import re
+# from pathlib import Path
+# from typing import Dict, List, Tuple
+
+
+# def load_keywords(path: Path) -> List[str]:
+#     seen = set()
+#     keywords: List[str] = []
+#     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+#         kw = line.strip()
+#         if kw and kw not in seen:
+#             seen.add(kw)
+#             keywords.append(kw)
+#     return keywords
+
+
+# def safe_read_lines(path: Path) -> List[str] | None:
+#     try:
+#         return path.read_text(encoding="utf-8", errors="ignore").splitlines()
+#     except Exception:
+#         return None
+
+
+# def context_block(lines: List[str], idx: int, before: int, after: int) -> str:
+#     start = max(0, idx - before)
+#     end = min(len(lines), idx + after + 1)
+#     block = []
+#     for i in range(start, end):
+#         marker = ">" if i == idx else " "
+#         block.append(f"{marker} {i+1}: {lines[i]}")
+#     return "\n".join(block)
+
+
+# def search_in_file(
+#     file_path: Path,
+#     patterns: Dict[str, re.Pattern],
+#     before: int,
+#     after: int,
+#     max_examples_per_keyword: int,
+# ) -> Dict[str, List[Tuple[int, int, str]]]:
+#     """Return matches grouped by keyword: (line, col, context)."""
+#     lines = safe_read_lines(file_path)
+#     if lines is None:
+#         return {}
+
+#     found: Dict[str, List[Tuple[int, int, str]]] = {k: [] for k in patterns}
+
+#     for idx, line in enumerate(lines):
+#         for kw, pat in patterns.items():
+#             if len(found[kw]) >= max_examples_per_keyword:
+#                 continue
+#             for m in pat.finditer(line):
+#                 ctx = context_block(lines, idx, before, after)
+#                 found[kw].append((idx + 1, m.start() + 1, ctx))
+#                 if len(found[kw]) >= max_examples_per_keyword:
+#                     break
+
+#     return {k: v for k, v in found.items() if v}
+
+
+# def main() -> None:
+#     parser = argparse.ArgumentParser(
+#         description="Search keywords in files recursively and log counts + context."
+#     )
+#     parser.add_argument("--keywords", required=True, type=Path, help="Path to newline-separated keywords file")
+#     parser.add_argument("--root", required=True, type=Path, help="Root folder to scan recursively")
+#     parser.add_argument("--out", default="keyword_search_report.log", type=Path, help="Output log file")
+#     parser.add_argument("--before", type=int, default=1, help="Context lines before match")
+#     parser.add_argument("--after", type=int, default=1, help="Context lines after match")
+#     parser.add_argument("--max-examples", type=int, default=3, help="Max context examples per keyword per file")
+#     parser.add_argument("--case-sensitive", action="store_true", help="Enable case-sensitive search")
+#     args = parser.parse_args()
+
+#     if not args.keywords.exists():
+#         raise SystemExit(f"Keywords file not found: {args.keywords}")
+#     if not args.root.exists() or not args.root.is_dir():
+#         raise SystemExit(f"Root folder is invalid: {args.root}")
+
+#     keywords = load_keywords(args.keywords)
+#     if not keywords:
+#         raise SystemExit("No keywords found in keyword file.")
+
+#     flags = 0 if args.case_sensitive else re.IGNORECASE
+#     patterns = {kw: re.compile(re.escape(kw), flags) for kw in keywords}
+
+#     summary = {
+#         kw: {
+#             "instances": 0,
+#             "files": set(),
+#             "examples": [],
+#         }
+#         for kw in keywords
+#     }
+
+#     files_scanned = 0
+#     for p in args.root.rglob("*"):
+#         if not p.is_file():
+#             continue
+#         files_scanned += 1
+#         matches = search_in_file(
+#             p,
+#             patterns,
+#             before=args.before,
+#             after=args.after,
+#             max_examples_per_keyword=args.max_examples,
+#         )
+#         for kw, items in matches.items():
+#             summary[kw]["instances"] += len(items)
+#             summary[kw]["files"].add(str(p))
+#             for line_no, col_no, ctx in items:
+#                 summary[kw]["examples"].append((str(p), line_no, col_no, ctx))
+
+#     lines_out = []
+#     lines_out.append("=== KEYWORD SEARCH REPORT ===")
+#     lines_out.append(f"Root: {args.root}")
+#     lines_out.append(f"Keywords file: {args.keywords}")
+#     lines_out.append(f"Files scanned: {files_scanned}")
+#     lines_out.append("")
+
+#     for kw in keywords:
+#         item = summary[kw]
+#         file_count = len(item["files"])
+#         lines_out.append(f"Keyword: {kw}")
+#         lines_out.append(f"  Instances found: {item['instances']}")
+#         lines_out.append(f"  Files matched: {file_count}")
+#         if item["instances"] == 0:
+#             lines_out.append("  No matches.")
+#             lines_out.append("")
+#             continue
+
+#         lines_out.append("  Sample contexts:")
+#         for i, (fp, line_no, col_no, ctx) in enumerate(item["examples"], start=1):
+#             lines_out.append(f"    [{i}] File: {fp}")
+#             lines_out.append(f"        At line {line_no}, col {col_no}")
+#             for c_line in ctx.splitlines():
+#                 lines_out.append(f"        {c_line}")
+#             lines_out.append("")
+
+#     args.out.write_text("\n".join(lines_out), encoding="utf-8")
+#     print(f"Done. Report written to: {args.out}")
+
+
+# if __name__ == "__main__":
+#     main()
