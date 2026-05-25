@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+# """
+# Simple word search utility:
+# 1. Read a list of words from input.txt (one word per line)
+# 2. For each word, search all files recursively in INLINE_ROOT
+# 3. When a word is found (word-boundary), check current line and 2 lines above for CREATE/REPLACE
+# 4. Write results to Excel: [create_line, word, status(found/not found)]
+# """
+# import csv
+# import re
+# from pathlib import Path
+
+# # ============ CONFIGURATION ============
+# # Path to input.txt containing words to search (one per line)
+# INPUT_FILE = r"C:\Users\ganesh.barua\Videos\tst.txt"
+
+# # Root folder to search in (recursive)
+# SEARCH_ROOT = r"C:\Users\ganesh.barua\Videos\New folder"
+
+# # Output Excel file
+# OUTPUT_FILE = "search_results.xlsx"
+
+# # Case-insensitive search?
+# IGNORE_CASE = True
+# # =====================================
+
+# def search_word_in_file(file_path: Path, word: str, word_regex: re.Pattern, create_regex: re.Pattern):
+#     """
+#     Search for word in a file. Return list of (file_path, create_line, word, status) tuples.
+#     """
+#     results = []
+#     try:
+#         text = file_path.read_text(encoding="utf-8", errors="ignore")
+#     except Exception:
+#         return results
+    
+#     lines = text.splitlines()
+#     for idx, line in enumerate(lines):
+#         if word_regex.search(line):
+#             # Check current line and 2 lines above for CREATE/REPLACE
+#             start = max(0, idx - 2)
+#             found_create = False
+#             create_line_text = ""
+            
+#             for j in range(start, idx + 1):
+#                 if create_regex.search(lines[j]):
+#                     found_create = True
+#                     create_line_text = lines[j].strip()
+#                     break
+            
+#             if found_create:
+#                 status = "found"
+#             else:
+#                 create_line_text = ""
+#                 status = "not found"
+            
+#             results.append((file_path.as_posix(), create_line_text, word, status))
+    
+#     return results
+
+
+# def main():
+#     input_path = Path(INPUT_FILE)
+#     search_root = Path(SEARCH_ROOT)
+#     output_path = Path(OUTPUT_FILE)
+    
+#     # Read words from input.txt
+#     if not input_path.exists():
+#         print(f"Error: {INPUT_FILE} not found")
+#         return
+    
+#     try:
+#         input_text = input_path.read_text(encoding="utf-8", errors="ignore")
+#     except Exception as e:
+#         print(f"Error reading {INPUT_FILE}: {e}")
+#         return
+    
+#     words = [w.strip() for w in input_text.splitlines() if w.strip()]
+    
+#     if not words:
+#         print(f"No words found in {INPUT_FILE}")
+#         return
+    
+#     print(f"Found {len(words)} words to search: {words}")
+    
+#     # Compile regex patterns
+#     flags = re.IGNORECASE if IGNORE_CASE else 0
+#     create_regex = re.compile(r"\b(create|replace)\b", flags)
+    
+#     all_results = []
+    
+#     # For each word, search all files in search_root
+#     for word in words:
+#         word_regex = re.compile(rf"\b{re.escape(word)}\b", flags)
+#         print(f"\nSearching for '{word}'...")
+        
+#         word_results = []
+#         for file_path in search_root.rglob("*"):
+#             if file_path.is_file():
+#                 matches = search_word_in_file(file_path, word, word_regex, create_regex)
+#                 word_results.extend(matches)
+        
+#         print(f"  Found {len(word_results)} matches")
+#         all_results.extend(word_results)
+    
+#     # Write results to Excel
+#     if not all_results:
+#         print("\nNo results found.")
+#         return
+    
+#     try:
+#         from openpyxl import Workbook
+        
+#         wb = Workbook()
+#         ws = wb.active
+#         ws.append(["file_path", "create_line", "search_word", "status"])
+#         for file_path, create_line, word, status in all_results:
+#             ws.append([file_path, create_line, word, status])
+#         wb.save(output_path)
+#         print(f"\nSuccessfully wrote {len(all_results)} rows to {output_path}")
+#     except ImportError:
+#         # Fallback to CSV if openpyxl not available
+#         csv_path = output_path.with_suffix(".csv")
+#         with open(csv_path, "w", newline="", encoding="utf-8") as f:
+#             writer = csv.writer(f)
+#             writer.writerow(["file_path", "create_line", "search_word", "status"])
+#             for file_path, create_line, word, status in all_results:
+#                 writer.writerow([file_path, create_line, word, status])
+#         print(f"\nopenpyxl not installed — wrote CSV to {csv_path}")
+
+
+# if __name__ == "__main__":
+#     main()
+
