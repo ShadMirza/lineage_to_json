@@ -1,0 +1,1127 @@
+# import csv
+# import copy
+# import json
+# import logging
+# import os
+# import sys
+# import threading
+# import uuid
+# from collections import defaultdict
+# from concurrent.futures import ThreadPoolExecutor, as_completed
+# from typing import List, Dict, Any, Optional
+
+
+# logger = logging.getLogger(__name__)
+
+
+# def setup_logging(output_dir: str, file_level_name: str = 'INFO') -> str:
+# 	"""Configure logging to both stdout and a file in output_dir."""
+# 	os.makedirs(output_dir, exist_ok=True)
+# 	log_file_path = os.path.join(output_dir, 'lineage_run.log')
+
+# 	root_logger = logging.getLogger()
+# 	root_logger.handlers.clear()
+# 	root_logger.setLevel(logging.DEBUG)
+
+# 	formatter = logging.Formatter(
+# 		'%(asctime)s | %(levelname)-7s | %(name)s | %(message)s',
+# 		datefmt='%Y-%m-%d %H:%M:%S'
+# 	)
+
+# 	console_handler = logging.StreamHandler(sys.stdout)
+# 	console_handler.setLevel(logging.INFO)
+# 	console_handler.setFormatter(formatter)
+
+# 	file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+# 	file_handler.setLevel(getattr(logging, file_level_name, logging.INFO))
+# 	file_handler.setFormatter(formatter)
+
+# 	root_logger.addHandler(console_handler)
+# 	root_logger.addHandler(file_handler)
+# 	return log_file_path
+
+
+# class ProgressBar:
+# 	"""Simple stdout-only progress bar (never written to log file)."""
+
+# 	def __init__(self, total: int, label: str, enabled: bool = True):
+# 		self.total = max(total, 0)
+# 		self.label = label
+# 		self.enabled = enabled and self.total > 0
+# 		self.current = 0
+# 		self._lock = threading.Lock()
+# 		if self.enabled:
+# 			self._render('start')
+
+# 	def _render(self, suffix: str = '') -> None:
+# 		pct = int((self.current / self.total) * 100) if self.total else 100
+# 		bar_len = 24
+# 		filled = int(bar_len * self.current / self.total) if self.total else bar_len
+# 		bar = '#' * filled + '-' * (bar_len - filled)
+# 		sfx = f" {suffix}" if suffix else ''
+# 		sys.stdout.write(f"\r{self.label}: [{bar}] {self.current}/{self.total} ({pct}%)" + sfx)
+# 		sys.stdout.flush()
+
+# 	def update(self, step: int = 1, suffix: str = '') -> None:
+# 		if not self.enabled:
+# 			return
+# 		with self._lock:
+# 			self.current = min(self.total, self.current + step)
+# 			self._render(suffix)
+
+# 	def close(self, suffix: str = 'done') -> None:
+# 		if not self.enabled:
+# 			return
+# 		with self._lock:
+# 			self.current = self.total
+# 			self._render(suffix)
+# 			sys.stdout.write('\n')
+# 			sys.stdout.flush()
+
+
+# def _pick_first_existing_key(sample: Dict[str, Any], candidates: List[str], default: str) -> str:
+# 	for key in candidates:
+# 		if key in sample:
+# 			return key
+# 	return default
+
+
+# def _resolve_qualified_keys(sample: Dict[str, Any]) -> Dict[str, str]:
+# 	return {
+# 		'src_qcol_key': _pick_first_existing_key(
+# 			sample,
+# 			['source_column_qualified', 'Source Column Qualified', 'source_qualified_column', 'Source Qualified Column'],
+# 			''
+# 		),
+# 		'tgt_qcol_key': _pick_first_existing_key(
+# 			sample,
+# 			['target_column_qualified', 'Target Column Qualified', 'target_qualified_column', 'Target Qualified Column', 'target_table_qualified'],
+# 			''
+# 		),
+# 	}
+
+
+# def _split_pipe_values(raw: Any) -> List[str]:
+# 	if raw is None:
+# 		return []
+# 	return [v.strip() for v in str(raw).split('|') if v.strip()]
+
+
+# def _is_intermediate_layer(row: Dict[str, Any]) -> bool:
+# 	"""Return True when this lineage row is marked as INTERMEDIATE layer."""
+# 	layer_raw = row.get('Layer')
+# 	if layer_raw is None:
+# 		layer_raw = row.get('layer')
+# 	return str(layer_raw or '').strip().upper() == 'INTERMEDIATE'
+
+
+# def compute_levels(rows: List[Dict[str, Any]], match_mode: str = 'qualified') -> List[Dict[str, Any]]:
+# 	"""Derive 'Level' for every row from lineage topology when the column is absent.
+
+# 	Level 0 = target table+column nodes that belong to final output tables.
+# 	Level N = longest upstream distance from a Level 0 seed.
+# 	Cycles are handled by collapsing strongly-connected components (SCCs).
+# 	"""
+# 	if not rows:
+# 		return rows
+
+# 	# Auto-detect canonical vs lowercase header names
+# 	sample = rows[0]
+# 	tgt_tbl_key = 'Target Table Name' if 'Target Table Name' in sample else 'target_table'
+# 	src_tbl_key = 'Source Table Name' if 'Source Table Name' in sample else 'source_table'
+# 	tgt_col_key = 'Target Column' if 'Target Column' in sample else 'target_column'
+# 	src_col_key = 'Source Column' if 'Source Column' in sample else 'source_column'
+# 	qkeys = _resolve_qualified_keys(sample)
+# 	src_qcol_key = qkeys['src_qcol_key']
+# 	tgt_qcol_key = qkeys['tgt_qcol_key']
+
+# 	# Build adjacency graph for the selected mode.
+# 	target_to_sources: Dict[Any, set] = defaultdict(set)
+# 	reverse_edges: Dict[Any, set] = defaultdict(set)
+# 	all_targets: set = set()
+# 	all_sources: set = set()
+# 	all_nodes: set = set()
+# 	all_target_tables: set = set()
+# 	all_source_tables: set = set()
+# 	all_sources_for_terminal: set = set()
+# 	all_source_tables_for_terminal: set = set()
+
+# 	if match_mode == 'qualified' and src_qcol_key and tgt_qcol_key:
+# 		for row in rows:
+# 			row_is_intermediate = _is_intermediate_layer(row)
+# 			tgt_qcol = (row.get(tgt_qcol_key) or '').strip()
+# 			if not tgt_qcol or tgt_qcol.upper() == 'N/A':
+# 				continue
+# 			target_node = tgt_qcol
+# 			all_targets.add(target_node)
+# 			all_nodes.add(target_node)
+# 			for src_qcol in _split_pipe_values(row.get(src_qcol_key)):
+# 				if src_qcol.upper() == 'N/A':
+# 					continue
+# 				source_node = src_qcol
+# 				all_sources.add(source_node)
+# 				if not row_is_intermediate:
+# 					all_sources_for_terminal.add(source_node)
+# 				all_nodes.add(source_node)
+# 				target_to_sources[target_node].add(source_node)
+# 				reverse_edges[source_node].add(target_node)
+# 	else:
+# 		for row in rows:
+# 			row_is_intermediate = _is_intermediate_layer(row)
+# 			tgt_tbl = (row.get(tgt_tbl_key) or '').strip()
+# 			tgt_col = (row.get(tgt_col_key) or '').strip()
+# 			if not tgt_tbl or not tgt_col or tgt_tbl.upper() == 'N/A' or tgt_col.upper() == 'N/A':
+# 				continue
+# 			all_target_tables.add(tgt_tbl)
+
+# 			target_node = (tgt_tbl, tgt_col)
+# 			all_targets.add(target_node)
+# 			all_nodes.add(target_node)
+
+# 			src_cols = [c.strip() for c in (row.get(src_col_key) or '').split('|')]
+# 			src_tbls = [t.strip() for t in (row.get(src_tbl_key) or '').split('|')]
+
+# 			if len(src_cols) == len(src_tbls):
+# 				pairs = zip(src_cols, src_tbls)
+# 			else:
+# 				pairs = [(c, t) for c in src_cols for t in src_tbls]
+
+# 			for src_col, src_tbl in pairs:
+# 				if not src_tbl or not src_col:
+# 					continue
+# 				if src_tbl.upper() == 'N/A' or src_col.upper() == 'N/A':
+# 					continue
+# 				all_source_tables.add(src_tbl)
+# 				if not row_is_intermediate:
+# 					all_source_tables_for_terminal.add(src_tbl)
+# 				source_node = (src_tbl, src_col)
+# 				all_sources.add(source_node)
+# 				if not row_is_intermediate:
+# 					all_sources_for_terminal.add(source_node)
+# 				all_nodes.add(source_node)
+# 				target_to_sources[target_node].add(source_node)
+# 				reverse_edges[source_node].add(target_node)
+
+# 	if match_mode == 'qualified' and src_qcol_key and tgt_qcol_key:
+# 		final_nodes = all_targets - all_sources_for_terminal
+# 		if not final_nodes:
+# 			final_nodes = all_targets
+# 	else:
+# 		# Hybrid rooting to preserve output behavior:
+# 		# level-0 seeds are target nodes that belong to final tables.
+# 		final_tables = all_target_tables - all_source_tables_for_terminal
+# 		if not final_tables:
+# 			final_tables = all_target_tables
+
+# 		final_nodes = {n for n in all_targets if n[0] in final_tables}
+# 		if not final_nodes:  # edge-case fallback
+# 			final_nodes = all_targets - all_sources
+# 		if not final_nodes:  # full-cycle edge-case fallback
+# 			final_nodes = all_targets
+
+# 	# Restrict computation to nodes reachable from level-0 seeds.
+# 	reachable: set = set()
+# 	queue: List[tuple] = list(final_nodes)
+# 	while queue:
+# 		n = queue.pop(0)
+# 		if n in reachable:
+# 			continue
+# 		reachable.add(n)
+# 		for src in target_to_sources.get(n, set()):
+# 			if src not in reachable:
+# 				queue.append(src)
+
+# 	# First pass of Kosaraju: finishing order on reachable subgraph.
+# 	visited: set = set()
+# 	finish_order: List[tuple] = []
+# 	for start in sorted(reachable):
+# 		if start in visited:
+# 			continue
+# 		stack: List[tuple] = [(start, 0)]
+# 		visited.add(start)
+# 		while stack:
+# 			node, phase = stack.pop()
+# 			if phase == 0:
+# 				stack.append((node, 1))
+# 				for nei in sorted(target_to_sources.get(node, set())):
+# 					if nei in reachable and nei not in visited:
+# 						visited.add(nei)
+# 						stack.append((nei, 0))
+# 			else:
+# 				finish_order.append(node)
+
+# 	# Second pass: assign SCC ids on reversed graph.
+# 	comp_id: Dict[tuple, int] = {}
+# 	components: List[List[tuple]] = []
+# 	for start in reversed(finish_order):
+# 		if start in comp_id:
+# 			continue
+# 		cid = len(components)
+# 		components.append([])
+# 		stack = [start]
+# 		comp_id[start] = cid
+# 		while stack:
+# 			node = stack.pop()
+# 			components[cid].append(node)
+# 			for nei in reverse_edges.get(node, set()):
+# 				if nei in reachable and nei not in comp_id:
+# 					comp_id[nei] = cid
+# 					stack.append(nei)
+
+# 	# Build DAG of SCC components.
+# 	comp_adj: Dict[int, set] = defaultdict(set)
+# 	comp_indeg: Dict[int, int] = defaultdict(int)
+# 	for node in reachable:
+# 		c_from = comp_id[node]
+# 		for src in target_to_sources.get(node, set()):
+# 			if src not in reachable:
+# 				continue
+# 			c_to = comp_id[src]
+# 			if c_from != c_to and c_to not in comp_adj[c_from]:
+# 				comp_adj[c_from].add(c_to)
+# 				comp_indeg[c_to] += 1
+
+# 	# Longest-distance layering over component DAG (seeded at level 0).
+# 	seed_components = {comp_id[n] for n in final_nodes if n in reachable}
+# 	comp_level: Dict[int, int] = {cid: 0 for cid in seed_components}
+# 	kahn: List[int] = [cid for cid in range(len(components)) if comp_indeg.get(cid, 0) == 0]
+# 	while kahn:
+# 		cid = kahn.pop(0)
+# 		for nxt in comp_adj.get(cid, set()):
+# 			if cid in comp_level:
+# 				cand = comp_level[cid] + 1
+# 				if cand > comp_level.get(nxt, -1):
+# 					comp_level[nxt] = cand
+# 			comp_indeg[nxt] -= 1
+# 			if comp_indeg[nxt] == 0:
+# 				kahn.append(nxt)
+
+# 	node_level: Dict[Any, int] = {}
+# 	for node in reachable:
+# 		node_level[node] = comp_level.get(comp_id[node], 0)
+
+# 	fallback_level = (max(node_level.values()) + 1) if node_level else 0
+
+# 	# Stamp each row with its computed level using target key in current mode.
+# 	for row in rows:
+# 		if match_mode == 'qualified' and src_qcol_key and tgt_qcol_key:
+# 			tgt_qcol = (row.get(tgt_qcol_key) or '').strip()
+# 			row['Level'] = node_level.get(tgt_qcol, fallback_level)
+# 		else:
+# 			tgt_tbl = (row.get(tgt_tbl_key) or '').strip()
+# 			tgt_col = (row.get(tgt_col_key) or '').strip()
+# 			row['Level'] = node_level.get((tgt_tbl, tgt_col), fallback_level)
+
+# 	lvls = list(node_level.values())
+# 	logger.debug(
+# 		"compute_levels assigned levels to %s nodes, range %s-%s",
+# 		len(node_level),
+# 		min(lvls, default=0),
+# 		max(lvls, default=0)
+# 	)
+# 	return rows
+
+
+# def parse_lineage_file(file_path: str, delimiter: str = '\t', match_mode: str = 'qualified') -> List[Dict[str, Any]]:
+# 	with open(file_path, 'r', encoding='utf-8-sig') as f:
+# 		reader = csv.DictReader(f, delimiter=delimiter)
+# 		rows = [dict(row) for row in reader]
+# 	# If the CSV has no Level column, derive it automatically from lineage topology
+# 	if rows and 'Level' not in rows[0]:
+# 		logger.info("'Level' column not found; computing levels from lineage topology.")
+# 		rows = compute_levels(rows, match_mode=match_mode)
+# 	logger.info("Parsed %s rows from input file.", len(rows))
+# 	return rows
+
+
+# def group_by_level(rows: List[Dict[str, Any]]) -> Dict[int, List[Dict[str, Any]]]:
+# 	levels: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+# 	for row in rows:
+# 		try:
+# 			level = int(row['Level'])
+# 		except (KeyError, ValueError):
+# 			continue
+# 		for k in ['Source Column', 'Target Column', 'Source Table Name', 'Target Table Name', 'Script Name']:
+# 			if k in row and isinstance(row[k], str):
+# 				row[k] = row[k].strip()
+# 		levels[level].append(row)
+# 	return levels
+
+
+# def attach_level_groups(node: Dict[str, Any], children: List[Dict[str, Any]]) -> Dict[str, Any]:
+# 	"""Attach children grouped by level while keeping LEVEL arrays at the end."""
+# 	# Remove existing LEVEL groups
+# 	for k in list(node.keys()):
+# 		if isinstance(k, str) and k.startswith('LEVEL '):
+# 			node.pop(k, None)
+
+# 	# Group children by level
+# 	grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+# 	for child in children:
+# 		if not isinstance(child, dict):
+# 			continue
+# 		try:
+# 			lvl = int(child.get('level', 0))
+# 		except (TypeError, ValueError):
+# 			continue
+# 		grouped[lvl].append(child)
+	
+# 	for lvl in sorted(grouped.keys()):
+# 		node[f'LEVEL {lvl}'] = grouped[lvl]
+# 	return node
+
+
+# def merge_passthrough_chain(node: Dict[str, Any]) -> Dict[str, Any]:
+# 	"""Merge consecutive single-child DIRECT_PASSTHROUGH nodes bottom-up."""
+# 	for k in list(node.keys()):
+# 		if isinstance(k, str) and k.startswith('LEVEL '):
+# 			node[k] = [merge_passthrough_chain(child) for child in node[k]]
+
+# 	if node.get('transformation', '').strip() != 'DIRECT_PASSTHROUGH':
+# 		return node
+
+# 	while True:
+# 		lvl_keys = [k for k in node if isinstance(k, str) and k.startswith('LEVEL ')]
+# 		if len(lvl_keys) != 1 or len(node[lvl_keys[0]]) != 1:
+# 			break
+# 		child = node[lvl_keys[0]][0]
+# 		if child.get('transformation', '').strip() != 'DIRECT_PASSTHROUGH':
+# 			break
+
+# 		existing_tbls = [t.strip() for t in node.get('source_tables', '').split('|') if t.strip() and t.strip().upper() != 'N/A']
+# 		for t in child.get('source_tables', '').split('|'):
+# 			t = t.strip()
+# 			if t and t.upper() != 'N/A' and t not in existing_tbls:
+# 				existing_tbls.append(t)
+# 		node['source_tables'] = ' | '.join(existing_tbls)
+
+# 		existing_fl = node.get('filter_logic', '').strip()
+# 		child_fl = child.get('filter_logic', '').strip()
+# 		if child_fl and child_fl.upper() != 'N/A' and child_fl not in existing_fl:
+# 			node['filter_logic'] = (existing_fl + ', ' + child_fl) if existing_fl and existing_fl.upper() != 'N/A' else child_fl
+# 		elif existing_fl.upper() == 'N/A' and child_fl and child_fl.upper() != 'N/A':
+# 			node['filter_logic'] = child_fl
+
+# 		existing_sn = [s.strip() for s in node.get('script_name', '').split('|') if s.strip() and s.strip().upper() != 'N/A']
+# 		for s in child.get('script_name', '').split('|'):
+# 			s = s.strip()
+# 			if s and s.upper() != 'N/A' and s not in existing_sn:
+# 				existing_sn.append(s)
+# 		node['script_name'] = ' | '.join(existing_sn)
+
+# 		node.setdefault('merged_levels', []).append(child['level'])
+# 		if child.get('merged_levels'):
+# 			node['merged_levels'].extend(child['merged_levels'])
+
+# 		del node[lvl_keys[0]]
+# 		for ck in [k for k in child if isinstance(k, str) and k.startswith('LEVEL ')]:
+# 			node[ck] = child[ck]
+
+# 		if not any(k for k in child if isinstance(k, str) and k.startswith('LEVEL ')):
+# 			break
+
+# 	return node
+
+
+# def build_target_indexes(levels: Dict[int, List[Dict[str, Any]]], match_mode: str = 'qualified') -> Dict[str, Dict[Any, List[tuple]]]:
+# 	"""Build lookup indexes to avoid repeatedly scanning all rows at each recursion step."""
+# 	if match_mode == 'qualified':
+# 		sample_row: Dict[str, Any] = {}
+# 		for _rows in levels.values():
+# 			if _rows:
+# 				sample_row = _rows[0]
+# 				break
+# 		qkeys = _resolve_qualified_keys(sample_row)
+# 		tgt_qcol_key = qkeys['tgt_qcol_key']
+# 		by_qcol: Dict[str, List[tuple]] = defaultdict(list)
+# 		for lvl, rows in levels.items():
+# 			for row in rows:
+# 				tgt_qcol = (row.get(tgt_qcol_key) or '').strip().lower()
+# 				if not tgt_qcol:
+# 					continue
+# 				by_qcol[tgt_qcol].append((lvl, row))
+# 		for key in by_qcol:
+# 			by_qcol[key].sort(key=lambda x: x[0])
+# 		return {
+# 			'by_qcol': by_qcol,
+# 			'tgt_qcol_key': tgt_qcol_key,
+# 			'src_qcol_key': qkeys['src_qcol_key'],
+# 		}
+
+# 	by_table_col: Dict[tuple, List[tuple]] = defaultdict(list)
+# 	by_col: Dict[str, List[tuple]] = defaultdict(list)
+# 	for lvl, rows in levels.items():
+# 		for row in rows:
+# 			tgt_col = (row.get('Target Column') or '').strip().lower()
+# 			tgt_tbl = (row.get('Target Table Name') or '').strip().lower()
+# 			if not tgt_col:
+# 				continue
+# 			by_table_col[(tgt_col, tgt_tbl)].append((lvl, row))
+# 			by_col[tgt_col].append((lvl, row))
+
+# 	for key in by_table_col:
+# 		by_table_col[key].sort(key=lambda x: x[0])
+# 	for key in by_col:
+# 		by_col[key].sort(key=lambda x: x[0])
+
+# 	return {
+# 		'by_table_col': by_table_col,
+# 		'by_col': by_col,
+# 	}
+
+
+# def build_lineage_tree(
+# 	levels: Dict[int, List[Dict[str, Any]]],
+# 	target_indexes: Dict[str, Dict[Any, List[tuple]]],
+# 	current_level: int,
+# 	target_column: str,
+# 	target_table: str,
+# 	visited_in_root: Optional[set] = None,
+# 	path_visited: Optional[set] = None,
+# 	node_reference_map: Optional[Dict[tuple, str]] = None,
+# 	cycle_stats: Optional[Dict[str, Any]] = None,
+# 	local_depth: int = 1,
+# 	max_depth: int = 100,
+# 	match_on_table: bool = True,
+# 	match_mode: str = 'qualified',
+# 	parent_uuid: str = ''
+# ) -> List[Dict[str, Any]]:
+# 	if visited_in_root is None:
+# 		visited_in_root = set()
+# 	if path_visited is None:
+# 		path_visited = set()
+# 	if node_reference_map is None:
+# 		node_reference_map = {}
+# 	if cycle_stats is None:
+# 		cycle_stats = {
+# 			'skipped': 0,
+# 			'seen_cycle_logs': set(),
+# 			'cycle_logs_emitted': 0,
+# 			'cycle_logs_suppressed': 0,
+# 			'max_cycle_logs': 50,
+# 			'nodes_visited': 0,
+# 		}
+# 	if local_depth > max_depth:
+# 		return []
+# 	children = []
+# 	_SENTINEL_SOURCES = {'', 'N/A', 'STATIC VALUE', 'STATIC_VALUE', 'CONSTANT', 'LITERAL'}
+# 	target_column_norm = (target_column or '').strip().lower()
+# 	target_table_norm = (target_table or '').strip().lower()
+# 	tgt_qcol_key = target_indexes.get('tgt_qcol_key', '')
+# 	src_qcol_key = target_indexes.get('src_qcol_key', '')
+
+# 	min_level = min(levels.keys())
+# 	start_level = max(current_level - 1, min_level)
+# 	if match_mode == 'qualified':
+# 		candidates = target_indexes.get('by_qcol', {}).get(target_column_norm, [])
+# 	else:
+# 		if match_on_table:
+# 			candidates = target_indexes.get('by_table_col', {}).get((target_column_norm, target_table_norm), [])
+# 		else:
+# 			candidates = target_indexes.get('by_col', {}).get(target_column_norm, [])
+
+# 	for next_level, row in candidates:
+# 		if next_level < start_level:
+# 			continue
+# 		if match_mode == 'qualified':
+# 			row_target_qcol = (row.get(tgt_qcol_key) or '').strip().lower()
+# 			is_match = row_target_qcol == target_column_norm
+# 		else:
+# 			row_target_column = (row.get('Target Column') or '').strip().lower()
+# 			row_target_table = (row.get('Target Table Name') or '').strip().lower()
+# 			is_column_match = row_target_column == target_column_norm
+# 			is_table_match = row_target_table == target_table_norm
+# 			is_match = is_column_match and (is_table_match or not match_on_table)
+
+# 		if is_match:
+# 			def _build_source_pairs(_row: Dict[str, Any]) -> List[tuple]:
+# 				if match_mode == 'qualified':
+# 					src_vals = _split_pipe_values(_row.get(src_qcol_key))
+# 					return [(v, '') for v in src_vals]
+# 				src_cols = [c.strip() for c in (_row.get('Source Column') or '').split('|') if c.strip()]
+# 				src_tbls = [t.strip() for t in (_row.get('Source Table Name') or '').split('|') if t.strip()]
+# 				if len(src_cols) == len(src_tbls):
+# 					return list(zip(src_cols, src_tbls))
+# 				return [(c, t) for c in src_cols for t in src_tbls]
+
+# 			def _is_expandable_source(src_col: str, src_tbl: str) -> bool:
+# 				col_u = (src_col or '').strip().upper()
+# 				tbl_u = (src_tbl or '').strip().upper()
+# 				if col_u in _SENTINEL_SOURCES:
+# 					return False
+# 				if match_mode != 'qualified' and tbl_u in {'', 'N/A'}:
+# 					return False
+# 				return True
+
+# 			def _has_real_upstream(_row: Dict[str, Any]) -> bool:
+# 				for sc, st in _build_source_pairs(_row):
+# 					sc_norm = (sc or '').strip().lower()
+# 					if not _is_expandable_source(sc, st):
+# 						continue
+# 					if match_mode == 'qualified':
+# 						if target_indexes.get('by_qcol', {}).get(sc_norm):
+# 							return True
+# 					else:
+# 						st_norm = (st or '').strip().lower()
+# 						if target_indexes.get('by_table_col', {}).get((sc_norm, st_norm)):
+# 							return True
+# 						if not match_on_table and target_indexes.get('by_col', {}).get(sc_norm):
+# 							return True
+# 				return False
+
+# 			def _canonical_source_signature(_row: Dict[str, Any]) -> tuple:
+# 				pairs = []
+# 				for sc, st in _build_source_pairs(_row):
+# 					if not _is_expandable_source(sc, st):
+# 						continue
+# 					if match_mode == 'qualified':
+# 						pairs.append((sc or '').strip().lower())
+# 					else:
+# 						pairs.append(((st or '').strip().lower(), (sc or '').strip().lower()))
+# 				pairs.sort()
+# 				return tuple(pairs)
+
+# 			if match_mode == 'qualified':
+# 				node_id = (
+# 					next_level,
+# 					' | '.join(sc for sc, _ in _build_source_pairs(row)),
+# 					row.get(tgt_qcol_key, '')
+# 				)
+# 			else:
+# 				node_id = (
+# 					next_level,
+# 					row.get('Source Column', ''),
+# 					row.get('Target Column', ''),
+# 					row.get('Source Table Name', ''),
+# 					row.get('Target Table Name', '')
+# 				)
+# 			subtree_key = (
+# 				next_level,
+# 				_canonical_source_signature(row)
+# 			)
+
+# 			# Cycle detection: node_id is in current path
+# 			if node_id in path_visited:
+# 				cycle_stats['skipped'] = cycle_stats.get('skipped', 0) + 1
+# 				if match_mode == 'qualified':
+# 					cycle_key = (
+# 						next_level,
+# 						row.get(tgt_qcol_key, ''),
+# 						' | '.join(sc for sc, _ in _build_source_pairs(row))
+# 					)
+# 				else:
+# 					cycle_key = (
+# 						next_level,
+# 						row.get('Target Table Name', ''),
+# 						row.get('Target Column', ''),
+# 						row.get('Source Table Name', ''),
+# 						row.get('Source Column', '')
+# 					)
+# 				seen_cycle_logs = cycle_stats.setdefault('seen_cycle_logs', set())
+# 				if cycle_key not in seen_cycle_logs:
+# 					seen_cycle_logs.add(cycle_key)
+# 					if cycle_stats.get('cycle_logs_emitted', 0) < cycle_stats.get('max_cycle_logs', 50):
+# 						cycle_stats['cycle_logs_emitted'] = cycle_stats.get('cycle_logs_emitted', 0) + 1
+# 						if match_mode == 'qualified':
+# 							logger.warning(
+# 								"Cycle skipped at level=%s target_qcol=%s source_qcol=%s",
+# 								next_level,
+# 								row.get(tgt_qcol_key, ''),
+# 								' | '.join(sc for sc, _ in _build_source_pairs(row))
+# 							)
+# 						else:
+# 							logger.warning(
+# 								"Cycle skipped at level=%s target=%s.%s source=%s.%s",
+# 								next_level,
+# 								row.get('Target Table Name', ''),
+# 								row.get('Target Column', ''),
+# 								row.get('Source Table Name', ''),
+# 								row.get('Source Column', '')
+# 							)
+# 					else:
+# 						cycle_stats['cycle_logs_suppressed'] = cycle_stats.get('cycle_logs_suppressed', 0) + 1
+
+# 				# Create cycle marker node
+# 				# parent_uuid = UUID of the node that tried to reach this cyclic node
+# 				if match_mode == 'qualified':
+# 					cycle_node = {
+# 						'level': local_depth,
+# 						'source_column_qualified': row.get(src_qcol_key, ''),
+# 						'target_column_qualified': row.get(tgt_qcol_key, ''),
+# 						'transformation': row.get('Transformation', ''),
+# 						'script_name': row.get('Script Name', ''),
+# 						'filter_logic': row.get('Filter Logic', ''),
+# 						'node_id': str(uuid.uuid4()),
+# 						'cycle_detected_from': parent_uuid
+# 					}
+# 				else:
+# 					cycle_node = {
+# 						'level': local_depth,
+# 						'source_column': row.get('Source Column', ''),
+# 						'target_column': row.get('Target Column', ''),
+# 						'source_tables': row.get('Source Table Name', ''),
+# 						'target_table': row.get('Target Table Name', ''),
+# 						'transformation': row.get('Transformation', ''),
+# 						'script_name': row.get('Script Name', ''),
+# 						'filter_logic': row.get('Filter Logic', ''),
+# 						'node_id': str(uuid.uuid4()),
+# 						'cycle_detected_from': parent_uuid
+# 					}
+# 				children.append(cycle_node)
+# 				continue
+
+# 			# Node already visited in this root
+# 			if subtree_key in visited_in_root:
+# 				has_subtree = _has_real_upstream(row)
+# 				reference_id = node_reference_map.get(subtree_key, '')
+# 				if (not has_subtree) or (not reference_id):
+# 					# True leaf — no upstream rows exist, emit full node
+# 					if match_mode == 'qualified':
+# 						children.append({
+# 							'level': local_depth,
+# 							'source_column_qualified': row.get(src_qcol_key, ''),
+# 							'target_column_qualified': row.get(tgt_qcol_key, ''),
+# 							'transformation': row.get('Transformation', ''),
+# 							'script_name': row.get('Script Name', ''),
+# 							'filter_logic': row.get('Filter Logic', ''),
+# 							'node_id': str(uuid.uuid4())
+# 						})
+# 					else:
+# 						children.append({
+# 							'level': local_depth,
+# 							'source_column': row.get('Source Column', ''),
+# 							'target_column': row.get('Target Column', ''),
+# 							'source_tables': row.get('Source Table Name', ''),
+# 							'target_table': row.get('Target Table Name', ''),
+# 							'transformation': row.get('Transformation', ''),
+# 							'script_name': row.get('Script Name', ''),
+# 							'filter_logic': row.get('Filter Logic', ''),
+# 							'node_id': str(uuid.uuid4())
+# 						})
+# 				else:
+# 					# Non-leaf with a real subtree — emit skip marker
+# 					if match_mode == 'qualified':
+# 						children.append({
+# 							'level': local_depth,
+# 							'source_column_qualified': row.get(src_qcol_key, ''),
+# 							'target_column_qualified': row.get(tgt_qcol_key, ''),
+# 							'transformation': row.get('Transformation', ''),
+# 							'script_name': row.get('Script Name', ''),
+# 							'filter_logic': row.get('Filter Logic', ''),
+# 							'node_id': str(uuid.uuid4()),
+# 							'subtree_visited_refer_to_node_id': reference_id
+# 						})
+# 					else:
+# 						children.append({
+# 							'level': local_depth,
+# 							'source_column': row.get('Source Column', ''),
+# 							'target_column': row.get('Target Column', ''),
+# 							'source_tables': row.get('Source Table Name', ''),
+# 							'target_table': row.get('Target Table Name', ''),
+# 							'transformation': row.get('Transformation', ''),
+# 							'script_name': row.get('Script Name', ''),
+# 							'filter_logic': row.get('Filter Logic', ''),
+# 							'node_id': str(uuid.uuid4()),
+# 							'subtree_visited_refer_to_node_id': reference_id
+# 						})
+# 				continue
+
+# 			visited_in_root.add(subtree_key)
+# 			cycle_stats['nodes_visited'] = cycle_stats.get('nodes_visited', 0) + 1
+# 			row_path_visited = set(path_visited)
+# 			row_path_visited.add(node_id)
+
+# 			# Generate UUID for current node
+# 			current_node_uuid = str(uuid.uuid4())
+
+# 			# Leaf node (terminal source)
+# 			if match_mode == 'qualified':
+# 				is_leaf = not any(_is_expandable_source(sc, st) for sc, st in _build_source_pairs(row))
+# 			else:
+# 				is_leaf = row['Source Column'] == 'N/A' and row['Source Table Name'] == 'N/A'
+# 			if is_leaf:
+# 				if match_mode == 'qualified':
+# 					node = {
+# 						'level': local_depth,
+# 						'source_column_qualified': row.get(src_qcol_key, ''),
+# 						'target_column_qualified': row.get(tgt_qcol_key, ''),
+# 						'transformation': row.get('Transformation', ''),
+# 						'script_name': row.get('Script Name', ''),
+# 						'filter_logic': row.get('Filter Logic', ''),
+# 						'node_id': current_node_uuid
+# 					}
+# 				else:
+# 					node = {
+# 						'level': local_depth,
+# 						'source_column': row['Source Column'],
+# 						'target_column': row['Target Column'],
+# 						'source_tables': row['Source Table Name'],
+# 						'target_table': row['Target Table Name'],
+# 						'transformation': row.get('Transformation', ''),
+# 						'script_name': row.get('Script Name', ''),
+# 						'filter_logic': row.get('Filter Logic', ''),
+# 						'node_id': current_node_uuid
+# 					}
+# 				children.append(node)
+# 			else:
+# 				# Non-leaf node with sources to traverse
+# 				_pairs = _build_source_pairs(row)
+# 				sub_children = []
+# 				for _src_col, _src_tbl in _pairs:
+# 					if not _is_expandable_source(_src_col, _src_tbl):
+# 						continue
+# 					sub_children.extend(build_lineage_tree(
+# 						levels,
+# 						target_indexes,
+# 						next_level,
+# 						_src_col,
+# 						_src_tbl,
+# 						visited_in_root,
+# 						row_path_visited,
+# 						node_reference_map,
+# 						cycle_stats,
+# 						local_depth + 1,
+# 						max_depth,
+# 						match_on_table=match_on_table,
+# 						match_mode=match_mode,
+# 						parent_uuid=current_node_uuid  # Pass current node's UUID
+# 					))
+
+# 				# Build node structure: regular fields first
+# 				if match_mode == 'qualified':
+# 					node = {
+# 						'level': local_depth,
+# 						'source_column_qualified': row.get(src_qcol_key, ''),
+# 						'target_column_qualified': row.get(tgt_qcol_key, ''),
+# 						'transformation': row.get('Transformation', ''),
+# 						'script_name': row.get('Script Name', ''),
+# 						'filter_logic': row.get('Filter Logic', ''),
+# 						'node_id': current_node_uuid
+# 					}
+# 				else:
+# 					node = {
+# 						'level': local_depth,
+# 						'source_column': row['Source Column'],
+# 						'target_column': row['Target Column'],
+# 						'source_tables': row['Source Table Name'],
+# 						'target_table': row['Target Table Name'],
+# 						'transformation': row.get('Transformation', ''),
+# 						'script_name': row.get('Script Name', ''),
+# 						'filter_logic': row.get('Filter Logic', ''),
+# 						'node_id': current_node_uuid
+# 					}
+
+# 				# Attach LEVEL groups when children exist.
+# 				if sub_children:
+# 					node_reference_map[subtree_key] = current_node_uuid
+# 					node = attach_level_groups(node, sub_children)
+# 				children.append(node)
+
+# 	return children
+
+
+# def lineage_to_nested_json(
+# 	rows: List[Dict[str, Any]],
+# 	target_column: Optional[str] = None,
+# 	target_table: Optional[str] = None,
+# 	match_on_table: bool = True,
+# 	match_mode: str = 'qualified',
+# 	max_depth: int = 100,
+# 	max_cycle_logs: int = 50,
+# 	show_progress: bool = True
+# ) -> List[Dict[str, Any]]:
+# 	levels = group_by_level(rows)
+# 	target_indexes = build_target_indexes(levels, match_mode=match_mode)
+# 	qkeys = _resolve_qualified_keys(rows[0] if rows else {})
+# 	src_qcol_key = qkeys['src_qcol_key']
+# 	tgt_qcol_key = qkeys['tgt_qcol_key']
+# 	logger.debug("Levels found in data: %s", sorted(levels.keys()))
+# 	result = []
+# 	root_level = min(levels.keys())
+# 	level1 = levels.get(root_level, [])
+# 	logger.info("Root level=%s rows=%s", root_level, len(level1))
+# 	seen = set()
+# 	target_column_norm = (target_column or '').strip().lower() if target_column else None
+# 	target_table_norm = (target_table or '').strip().lower() if target_table else None
+
+# 	if match_mode == 'qualified':
+# 		logger.info("Filter mode=qualified target_qualified=%s target_table=%s", target_column_norm, target_table_norm)
+# 	else:
+# 		logger.info("Filter mode=table_column target_column=%s target_table=%s", target_column_norm, target_table_norm)
+
+# 	progress = ProgressBar(total=len(level1), label='Building lineage', enabled=show_progress)
+
+# 	for row in level1:
+# 		progress.update()
+# 		if match_mode == 'qualified' and src_qcol_key and tgt_qcol_key:
+# 			key = (row.get(tgt_qcol_key) or '').strip().lower()
+# 		else:
+# 			key = (
+# 				(row.get('Target Column') or '').strip().lower(),
+# 				(row.get('Target Table Name') or '').strip().lower()
+# 			)
+# 		if key in seen:
+# 			continue
+# 		if match_mode == 'qualified' and src_qcol_key and tgt_qcol_key:
+# 			if target_column_norm and key != target_column_norm:
+# 				continue
+# 			if target_table_norm and (row.get('Target Table Name') or '').strip().lower() != target_table_norm:
+# 				continue
+# 		else:
+# 			if target_column_norm and key[0] != target_column_norm:
+# 				continue
+# 			if target_table_norm and key[1] != target_table_norm:
+# 				continue
+# 		seen.add(key)
+# 		logger.debug("Matched root key=%s at level=%s", key, root_level)
+
+# 		if match_mode == 'qualified' and src_qcol_key and tgt_qcol_key:
+# 			group_rows = [
+# 				r for r in level1
+# 				if (r.get(tgt_qcol_key) or '').strip().lower() == key
+# 			]
+# 		else:
+# 			group_rows = [
+# 				r for r in level1
+# 				if (
+# 					(r.get('Target Column') or '').strip().lower(),
+# 					(r.get('Target Table Name') or '').strip().lower()
+# 				) == key
+# 			]
+
+# 		all_source_columns: set = set()
+# 		all_source_tables: set = set()
+# 		script_names: set = set()
+# 		for r in group_rows:
+# 			if match_mode == 'qualified' and src_qcol_key:
+# 				cols = _split_pipe_values(r.get(src_qcol_key))
+# 			else:
+# 				cols = [c.strip() for c in r['Source Column'].split('|')]
+# 			for col in cols:
+# 				v = col.strip()
+# 				if v and v.upper() != 'N/A':
+# 					all_source_columns.add(v)
+# 			if not (match_mode == 'qualified' and src_qcol_key):
+# 				for tbl in r['Source Table Name'].split('|'):
+# 					v = tbl.strip()
+# 					if v and v.upper() != 'N/A':
+# 						all_source_tables.add(v)
+# 			if 'Script Name' in r and r['Script Name'] and r['Script Name'].upper() != 'N/A':
+# 				script_names.add(r['Script Name'])
+
+# 		script_name = ' | '.join(sorted(script_names)) if script_names else ''
+		
+# 		# Root lineage node with metadata fields
+# 		root_node_uuid = str(uuid.uuid4())
+# 		if match_mode == 'qualified' and src_qcol_key and tgt_qcol_key:
+# 			lineage = {
+# 				'generated_column_qualified': row.get(tgt_qcol_key, ''),
+# 				'lineage': {
+# 					'level': 0,
+# 					'source_column_qualified': ' | '.join(sorted(all_source_columns)),
+# 					'target_column_qualified': row.get(tgt_qcol_key, ''),
+# 					'transformation': ' | '.join(sorted(set(r.get('Transformation', '') for r in group_rows if r.get('Transformation', '').upper() != 'N/A'))),
+# 					'script_name': script_name,
+# 					'filter_logic': ' | '.join(sorted(set(r.get('Filter Logic', '') for r in group_rows if r.get('Filter Logic', '').upper() != 'N/A'))),
+# 					'node_id': root_node_uuid
+# 				}
+# 			}
+# 		else:
+# 			lineage = {
+# 				'generated_column': row['Target Column'],
+# 				'lineage': {
+# 					'level': 0,
+# 					'source_column': ' | '.join(sorted(all_source_columns)),
+# 					'target_column': row['Target Column'],
+# 					'source_tables': ' | '.join(sorted(all_source_tables)),
+# 					'target_table': row['Target Table Name'],
+# 					'transformation': ' | '.join(sorted(set(r.get('Transformation', '') for r in group_rows if r.get('Transformation', '').upper() != 'N/A'))),
+# 					'script_name': script_name,
+# 					'filter_logic': ' | '.join(sorted(set(r.get('Filter Logic', '') for r in group_rows if r.get('Filter Logic', '').upper() != 'N/A'))),
+# 					'node_id': root_node_uuid
+# 				}
+# 			}
+
+# 		children: List[Dict[str, Any]] = []
+# 		visited_in_root: set = set()
+# 		node_reference_map: Dict[tuple, str] = {}
+# 		cycle_stats = {
+# 			'skipped': 0,
+# 			'seen_cycle_logs': set(),
+# 			'cycle_logs_emitted': 0,
+# 			'cycle_logs_suppressed': 0,
+# 			'max_cycle_logs': max_cycle_logs,
+# 			'nodes_visited': 0,
+# 		}
+# 		for r in group_rows:
+# 			if match_mode == 'qualified' and src_qcol_key and tgt_qcol_key:
+# 				pairs = [(sc, '') for sc in _split_pipe_values(r.get(src_qcol_key))]
+# 			else:
+# 				src_cols = [c.strip() for c in r['Source Column'].split('|')]
+# 				src_tbls = [t.strip() for t in r['Source Table Name'].split('|')]
+# 				if len(src_cols) == len(src_tbls):
+# 					pairs = zip(src_cols, src_tbls)
+# 				else:
+# 					pairs = [(c, t) for c in src_cols for t in src_tbls]
+# 			for src_col, src_tbl in pairs:
+# 				if (src_col or '').strip().upper() == 'N/A':
+# 					continue
+# 				sub_children = build_lineage_tree(
+# 					levels,
+# 					target_indexes,
+# 					root_level,
+# 					src_col,
+# 					src_tbl,
+# 					visited_in_root=visited_in_root,
+# 					path_visited=set(),
+# 					node_reference_map=node_reference_map,
+# 					cycle_stats=cycle_stats,
+# 					max_depth=max_depth,
+# 					local_depth=1,
+# 					match_on_table=match_on_table,
+# 					match_mode=match_mode,
+# 					parent_uuid=root_node_uuid  # Pass root UUID as parent
+# 				)
+# 				if sub_children:
+# 					children.extend(sub_children)
+
+# 		if cycle_stats.get('skipped', 0):
+# 			if match_mode == 'qualified' and tgt_qcol_key:
+# 				logger.debug(
+# 					"Traversal summary for %s: skipped_cycles=%s suppressed_cycle_logs=%s nodes_visited=%s",
+# 					row.get(tgt_qcol_key, ''),
+# 					cycle_stats['skipped'],
+# 					cycle_stats.get('cycle_logs_suppressed', 0),
+# 					cycle_stats.get('nodes_visited', 0)
+# 				)
+# 			else:
+# 				logger.debug(
+# 					"Traversal summary for %s.%s: skipped_cycles=%s suppressed_cycle_logs=%s nodes_visited=%s",
+# 					row.get('Target Table Name', ''),
+# 					row.get('Target Column', ''),
+# 					cycle_stats['skipped'],
+# 					cycle_stats.get('cycle_logs_suppressed', 0),
+# 					cycle_stats.get('nodes_visited', 0)
+# 				)
+
+# 		if children:
+# 			lineage['lineage'] = attach_level_groups(lineage['lineage'], children)
+
+# 		result.append(lineage)
+
+# 	progress.close()
+# 	logger.info("Built lineage roots: %s", len(result))
+# 	return result
+
+
+# def main() -> None:
+# 	import argparse
+# 	import os
+
+# 	parser = argparse.ArgumentParser(
+# 		description='Column-level lineage to nested JSON - auto-computes Level when absent.'
+# 	)
+# 	parser.add_argument('input_file', help='Input CSV/TSV file path')
+# 	parser.add_argument('-d', '--delimiter', default='\t', help='Delimiter (default: tab)')
+# 	parser.add_argument('-o', '--output', help='Output directory path (default: ./output_json)')
+# 	parser.add_argument('--target_column', help='Filter: target column name (optional)')
+# 	parser.add_argument('--target_table', help='Filter: target table name (optional)')
+# 	parser.add_argument(
+# 		'--match_mode',
+# 		default='qualified',
+# 		choices=['table_column', 'qualified'],
+# 		help='Matching mode: table_column (legacy src/tgt col+table) or qualified (source_column_qualified -> target_column_qualified).'
+# 	)
+# 	parser.add_argument('--max_depth', type=int, default=100, help='Maximum lineage depth to traverse (default: 100)')
+# 	parser.add_argument('--max_cycle_logs', type=int, default=50, help='Maximum cycle warning logs emitted per root (default: 50)')
+# 	parser.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help='Logging level (default: INFO)')
+# 	parser.add_argument('--write_workers', type=int, default=max(2, min(8, os.cpu_count() or 2)), help='Worker threads for output file writing (default: auto)')
+# 	parser.add_argument('--no_progress', action='store_true', help='Disable stdout progress bars')
+# 	parser.add_argument(
+# 		'--column_only_match',
+# 		action='store_true',
+# 		help='Match lineage by target column only (ignore target table) during recursion'
+# 	)
+# 	args = parser.parse_args()
+
+# 	default_output = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output_json')
+# 	output_dir = args.output or default_output
+# 	log_file_path = setup_logging(output_dir, args.log_level)
+# 	logger.info("Logging enabled. console=INFO file=%s file_level=%s", log_file_path, args.log_level)
+
+# 	rows = parse_lineage_file(args.input_file, args.delimiter, match_mode=args.match_mode)
+# 	nested = lineage_to_nested_json(
+# 		rows,
+# 		target_column=args.target_column,
+# 		target_table=args.target_table,
+# 		match_on_table=not args.column_only_match,
+# 		match_mode=args.match_mode,
+# 		max_depth=args.max_depth,
+# 		max_cycle_logs=args.max_cycle_logs,
+# 		show_progress=not args.no_progress
+# 	)
+
+# 	def safe_path_component(name: str) -> str:
+# 		# Preserve '$' and '.'; only replace characters invalid in Windows file/folder names.
+# 		invalid = '<>:"/\\|?*'
+# 		cleaned = ''.join('_' if (ch in invalid or ord(ch) < 32) else ch for ch in str(name))
+# 		cleaned = cleaned.rstrip(' .')
+# 		return cleaned or 'output'
+
+# 	os.makedirs(output_dir, exist_ok=True)
+# 	merged_dir = os.path.join(output_dir, '_merged_')
+# 	os.makedirs(merged_dir, exist_ok=True)
+
+# 	def write_entry(entry: Dict[str, Any]) -> None:
+# 		col = entry.get('generated_column') or entry.get('generated_column_qualified') or 'output'
+# 		target_table_name = (
+# 			entry.get('lineage', {}).get('target_table')
+# 			or (
+# 				str(entry.get('generated_column_qualified', '')).rsplit('.', 1)[0]
+# 				if entry.get('generated_column_qualified') else ''
+# 			)
+# 			or 'unknown_table'
+# 		)
+# 		table_folder = safe_path_component(str(target_table_name))
+# 		fname = safe_path_component(str(col)) + '.json'
+
+# 		table_output_dir = os.path.join(output_dir, table_folder)
+# 		os.makedirs(table_output_dir, exist_ok=True)
+
+# 		fpath = os.path.join(table_output_dir, fname)
+# 		with open(fpath, 'w', encoding='utf-8') as f:
+# 			json.dump(entry, f, indent=2)
+
+# 		merged_entry = copy.deepcopy(entry)
+# 		for lk in list(merged_entry['lineage'].keys()):
+# 			if isinstance(lk, str) and lk.startswith('LEVEL '):
+# 				merged_entry['lineage'][lk] = [merge_passthrough_chain(c) for c in merged_entry['lineage'][lk]]
+
+# 		merged_table_output_dir = os.path.join(merged_dir, table_folder)
+# 		os.makedirs(merged_table_output_dir, exist_ok=True)
+# 		mpath = os.path.join(merged_table_output_dir, fname)
+# 		with open(mpath, 'w', encoding='utf-8') as f:
+# 			json.dump(merged_entry, f, indent=2)
+
+# 	write_progress = ProgressBar(total=len(nested), label='Writing JSON', enabled=not args.no_progress)
+# 	workers = max(1, int(args.write_workers))
+# 	if workers > 1 and len(nested) > 1:
+# 		with ThreadPoolExecutor(max_workers=workers) as executor:
+# 			futures = [executor.submit(write_entry, entry) for entry in nested]
+# 			for future in as_completed(futures):
+# 				future.result()
+# 				write_progress.update()
+# 	else:
+# 		for entry in nested:
+# 			write_entry(entry)
+# 			write_progress.update()
+# 	write_progress.close()
+
+# 	logger.info("Wrote %s files to %s", len(nested), output_dir)
+# 	logger.info("Wrote %s merged files to %s", len(nested), merged_dir)
+
+
+# if __name__ == '__main__':
+# 	main()
+
+
