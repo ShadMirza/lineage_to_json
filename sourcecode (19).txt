@@ -1,0 +1,100 @@
+# from __future__ import annotations
+# import json
+# import os
+# import sys
+# from typing import Any, Dict, List, Tuple
+
+# REF_KEYS = ("cycle_detected_from", "subtree_visited_refer_to_node_id")
+
+
+# def _own_ids(node: Dict[str, Any]) -> List[str]:
+# 	nid = node.get("node_id")
+# 	if isinstance(nid, list):
+# 		return [v for v in nid if isinstance(v, str)]
+# 	if isinstance(nid, str):
+# 		return [nid]
+# 	return []
+
+
+# def _walk(node: Dict[str, Any], all_ids: List[str], refs: List[Tuple[str, str, List[str]]]) -> None:
+# 	own = _own_ids(node)
+# 	all_ids.extend(own)
+# 	for rk in REF_KEYS:
+# 		rv = node.get(rk)
+# 		if isinstance(rv, str) and rv:
+# 			refs.append((rk, rv, own))
+# 	for k, v in node.items():
+# 		if isinstance(k, str) and k.startswith("LEVEL ") and isinstance(v, list):
+# 			for child in v:
+# 				if isinstance(child, dict):
+# 					_walk(child, all_ids, refs)
+
+
+# def validate(path: str) -> bool:
+# 	with open(path, "r", encoding="utf-8") as f:
+# 		obj = json.load(f)
+# 	root = obj.get("lineage", obj)
+# 	all_ids: List[str] = []
+# 	refs: List[Tuple[str, str, List[str]]] = []
+# 	_walk(root, all_ids, refs)
+
+# 	ok = True
+# 	id_set = set(all_ids)
+
+# 	# 1) uniqueness
+# 	if len(all_ids) != len(id_set):
+# 		dupes: Dict[str, int] = {}
+# 		for x in all_ids:
+# 			dupes[x] = dupes.get(x, 0) + 1
+# 		dupes = {k: v for k, v in dupes.items() if v > 1}
+# 		print(f"  FAIL uniqueness: {len(all_ids)} ids, {len(id_set)} unique; duplicates: {dupes}")
+# 		ok = False
+
+# 	# 2) every ref resolves
+# 	unresolved = [(k, r) for k, r, _ in refs if r not in id_set]
+# 	if unresolved:
+# 		print(f"  FAIL unresolved refs ({len(unresolved)}): first 5 = {unresolved[:5]}")
+# 		ok = False
+
+# 	# 3) no self-reference
+# 	self_refs = [(k, r) for k, r, owner in refs if r in owner]
+# 	if self_refs:
+# 		print(f"  FAIL self-references ({len(self_refs)}): first 5 = {self_refs[:5]}")
+# 		ok = False
+
+# 	if ok:
+# 		print(f"  OK  ids={len(all_ids)} unique={len(id_set)} refs={len(refs)}  ({path})")
+# 	else:
+# 		print(f"  -- failed: {path}")
+# 	return ok
+
+
+# def iter_json_paths(targets: List[str]):
+# 	for t in targets:
+# 		if os.path.isdir(t):
+# 			for d, _dirs, files in os.walk(t):
+# 				for f in files:
+# 					if f.endswith(".json"):
+# 						yield os.path.join(d, f)
+# 		else:
+# 			yield t
+
+
+# def main() -> int:
+# 	if len(sys.argv) < 2:
+# 		print(__doc__)
+# 		return 2
+# 	any_fail = False
+# 	count = 0
+# 	for p in iter_json_paths(sys.argv[1:]):
+# 		count += 1
+# 		if not validate(p):
+# 			any_fail = True
+# 	print(f"\nchecked {count} file(s) -- {'ALL OK' if not any_fail else 'FAILURES PRESENT'}")
+# 	return 1 if any_fail else 0
+
+
+# if __name__ == "__main__":
+# 	raise SystemExit(main())
+
+
